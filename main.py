@@ -64,10 +64,10 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Load environment variables (only in local development)
-if os.environ.get("ENV", "local") == "local":
-    from dotenv import load_dotenv
-    load_dotenv()
+# # Load environment variables (only in local development)
+# if os.environ.get("ENV", "local") == "local":
+#     from dotenv import load_dotenv
+#     load_dotenv()
 
 
 class EnvironmentSetup:
