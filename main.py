@@ -23,14 +23,11 @@ import logging
 import os
 import subprocess
 import sys
-import time
 from typing import Dict, Any, Optional
 
 # Setup verification and dependency installation
 def verify_and_install_dependencies():
     """Verify and install required dependencies."""
-    print("🔍 Checking dependencies...")
-    
     required_packages = {
         'slack_bolt': 'slack-bolt>=1.15.0',
         'dotenv': 'python-dotenv>=0.19.0'
@@ -41,19 +38,14 @@ def verify_and_install_dependencies():
     for package, pip_name in required_packages.items():
         try:
             __import__(package)
-            print(f"✅ {package}: Available")
         except ImportError:
-            print(f"❌ {package}: Missing")
             missing_packages.append(pip_name)
     
     if missing_packages:
-        print(f"\n📦 Installing missing packages: {', '.join(missing_packages)}")
         try:
             subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + missing_packages)
-            print("✅ All packages installed successfully!")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install packages: {e}")
-            print("Please run: pip install slack-bolt python-dotenv")
+            logging.error(f"Failed to install packages: {e}")
             sys.exit(1)
 
 # Verify dependencies first
@@ -90,7 +82,6 @@ SLACK_APP_TOKEN=xapp-your-app-token-here
 """
             with open(env_file, 'w') as f:
                 f.write(env_template)
-            print(f"📄 Created {env_file} template. Please add your Slack tokens.")
             return False
         return True
     
@@ -101,17 +92,12 @@ SLACK_APP_TOKEN=xapp-your-app-token-here
         slack_app_token = os.getenv("SLACK_APP_TOKEN")
         
         if not slack_bot_token or slack_bot_token == "xoxb-your-bot-token-here":
-            print("❌ SLACK_BOT_TOKEN not set or using template value")
-            print("   Get your bot token from https://api.slack.com/apps → Your App → OAuth & Permissions")
+            logging.error("SLACK_BOT_TOKEN not set or using template value")
             return None, None
             
         if not slack_app_token or slack_app_token == "xapp-your-app-token-here":
-            print("❌ SLACK_APP_TOKEN not set or using template value")
-            print("   Get your app token from https://api.slack.com/apps → Your App → Basic Information → App-Level Tokens")
+            logging.error("SLACK_APP_TOKEN not set or using template value")
             return None, None
-        
-        print(f"✅ SLACK_BOT_TOKEN: Found (starts with: {slack_bot_token[:10]}...)")
-        print(f"✅ SLACK_APP_TOKEN: Found (starts with: {slack_app_token[:10]}...)")
         
         return slack_bot_token, slack_app_token
 
@@ -197,10 +183,7 @@ class Phase1SlackBot:
         # Slash commands
         self.app.command("/bot-settings")(self.handle_settings_command)
         self.app.command("/bot-help")(self.handle_help_command)
-        self.app.command("/bot-debug")(self.handle_debug_command)  # Add debug command
-        
-        # Log command registration
-        logging.info("📋 Registered slash commands: /bot-settings, /bot-help, /bot-debug")
+        self.app.command("/bot-debug")(self.handle_debug_command)
     
     async def initialize_bot_info(self) -> None:
         """Get the bot's ID and other info."""
@@ -208,14 +191,13 @@ class Phase1SlackBot:
             auth_info = await self.client.auth_test()
             self.bot_id = auth_info["user_id"]
             bot_name = auth_info.get("user", "Unknown")
-            logging.info(f"🤖 Bot initialized: {bot_name} (ID: {self.bot_id})")
+            logging.info(f"Bot initialized: {bot_name} (ID: {self.bot_id})")
         except Exception as e:
             logging.error(f"Failed to get bot info: {e}")
             self.bot_id = None
     
     async def handle_mention(self, event, say):
         """Handle mentions of the bot in channels."""
-        logging.info(f"Bot mentioned! Event: {event}")
         await self._send_hello_world(event, say)
     
     async def handle_message(self, message, say):
@@ -246,11 +228,8 @@ class Phase1SlackBot:
         channel_type = event.get("channel_type", "unknown")
         text = event.get("text", "")
         
-        logging.info(f"_send_hello_world called - User: {user_id}, Channel type: {channel_type}, Bot ID: {self.bot_id}")
-        
         # Skip messages from the bot itself
         if user_id == self.bot_id:
-            logging.info("Skipping message from bot itself")
             return
         
         # Reload settings to ensure we have the latest values
@@ -261,32 +240,24 @@ class Phase1SlackBot:
         auto_respond = self.settings.get("auto_respond")
         reply_in_thread = self.settings.get("reply_in_thread")
         
-        logging.info(f"Current settings (reloaded) - mention_only: {mention_only}, auto_respond: {auto_respond}, reply_in_thread: {reply_in_thread}")
-        
         # Check if we should only respond to mentions
         if mention_only:
             # For channels, only respond if mentioned
             if channel_type != "im":
                 if not (hasattr(self, "bot_id") and self.bot_id and f"<@{self.bot_id}>" in text):
-                    logging.info(f"Mention only enabled, but bot not mentioned in text: '{text}'")
                     return
-                else:
-                    logging.info(f"Bot mentioned in text: '{text}'")
         
         # Check if auto_respond is enabled
         if not auto_respond:
-            logging.info("Auto respond disabled, not responding")
             return
         
         # Determine thread_ts based on settings
         thread_ts = None
         if reply_in_thread:
             thread_ts = event.get("thread_ts", event.get("ts"))
-            logging.info(f"Reply in thread enabled, thread_ts: {thread_ts}")
         
         try:
             await say(text="*Hello World!* :wave:", thread_ts=thread_ts)
-            logging.info(f"Sent Hello World response to user {user_id}")
         except Exception as e:
             logging.error(f"Error sending Hello World: {e}")
     
@@ -315,7 +286,6 @@ class Phase1SlackBot:
 
         try:
             await say(text=settings_text)
-            logging.info(f"Sent current settings info to user {message.get('user')}: {settings}")
         except Exception as e:
             logging.error(f"Error sending settings info: {e}")
 
@@ -345,7 +315,6 @@ class Phase1SlackBot:
 
         try:
             await say(text=help_text)
-            logging.info(f"Sent help info to user {message.get('user')}")
         except Exception as e:
             logging.error(f"Error sending help info: {e}")
 
@@ -424,29 +393,26 @@ class Phase1SlackBot:
             logging.error(f"Error publishing home view: {e}")
     
     async def handle_settings_command(self, ack, body, client):
-        """Handle /bot-settings slash command with proper timing."""
-        # Acknowledge immediately to prevent dispatch_failed
+        """Handle /bot-settings slash command."""
         await ack()
-        # Get command details
-        user_id = body.get('user_id', 'unknown')
-        channel_id = body.get('channel_id', 'unknown')
+        
+        user_id = body.get('user_id')
+        channel_id = body.get('channel_id')
         trigger_id = body.get('trigger_id')
-        logging.info(f"Processing /bot-settings command - User: {user_id}, Channel: {channel_id}, Trigger ID present: {bool(trigger_id)}")
-        # Validate trigger_id
+        
         if not trigger_id:
-            logging.error("Missing trigger_id in slash command body")
             await client.chat_postEphemeral(
                 channel=channel_id, user=user_id,
                 text=":x: *Command error*: Missing session data. Please try the App Home tab for settings."
             )
             return
-        # Try to open settings modal
+        
         try:
             await self._open_settings_modal_fast(trigger_id, client, user_id)
-            logging.info(f"Successfully opened settings modal for user {user_id}")
         except SlackApiError as modal_error:
             error_msg = str(modal_error).lower()
             logging.error(f"Modal error: {modal_error}")
+            
             if "expired_trigger_id" in error_msg or "invalid_trigger" in error_msg:
                 text = ":warning: *Session expired*. Please try `/bot-settings` again or use the App Home tab."
             elif "missing_scope" in error_msg or "not_allowed" in error_msg:
@@ -454,14 +420,13 @@ class Phase1SlackBot:
             elif "invalid_arguments" in error_msg:
                 text = ":x: *Settings modal unavailable*. Try the App Home tab or mention me for help."
             else:
-                fallback_text = (
+                text = (
                     "*⚙️ Current Bot Settings:*\n"
                     f"* Reply in Thread: {'*✅*' if self.settings.get('reply_in_thread') else '*❌*'}\n"
                     f"* Mention Only: {'*✅*' if self.settings.get('mention_only') else '*❌*'}\n"
                     f"* Auto Respond: {'*✅*' if self.settings.get('auto_respond') else '*❌*'}\n\n"
                     "Use the App Home tab to change settings."
                 )
-                text = fallback_text
             await client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
         except Exception as e:
             logging.error(f"Unexpected error in /bot-settings command: {e}")
@@ -473,9 +438,8 @@ class Phase1SlackBot:
     async def handle_help_command(self, ack, body, client):
         """Handle /bot-help slash command."""
         await ack()
+        
         try:
-            logging.info(f"Received /bot-help command from user {body.get('user_id')}")
-            
             help_text = (
                 "*🤖 Phase 1 Bot Help*\n\n"
                 "*What I can do:*\n"
@@ -503,7 +467,6 @@ class Phase1SlackBot:
                 user=body["user_id"],
                 text=help_text
             )
-            logging.info(f"Sent help message to user {body['user_id']}")
         except Exception as e:
             logging.error(f"Error handling help command: {e}")
             try:
@@ -512,8 +475,8 @@ class Phase1SlackBot:
                     user=body["user_id"],
                     text=":x: Error showing help. You can mention me or send a DM for assistance!"
                 )
-            except Exception as fallback_error:
-                logging.error(f"Error in help command fallback: {fallback_error}")
+            except Exception:
+                pass
     
     async def handle_debug_command(self, ack, body, client):
         """Handle /bot-debug slash command for troubleshooting."""
@@ -526,14 +489,12 @@ class Phase1SlackBot:
             self.settings.settings = self.settings.load_settings()
             
             # Get debug information
-            current_time = time.time()
             trigger_id = body.get("trigger_id", "None")
             
             debug_text = (
                 "*🔍 Bot Debug Information*\n\n"
                 "*System Status:*\n"
                 f"* Bot ID: `{self.bot_id or 'Unknown'}`\n"
-                f"* Timestamp: `{current_time}`\n"
                 f"* Trigger ID Present: {'*Yes*' if trigger_id != 'None' else '*No*'}\n"
                 f"* Settings File: {'*Found*' if os.path.exists('bot_settings.json') else '*Missing*'}\n\n"
                 "*Current Settings (reloaded from file):*\n"
@@ -549,7 +510,7 @@ class Phase1SlackBot:
                 "*Next Steps:*\n"
                 "1. Try `/bot-settings` now\n"
                 "2. If it fails, use the App Home tab\n"
-                "3. Report any errors with timestamp above"
+                "3. Check logs for any error messages"
             )
             
             await client.chat_postEphemeral(
@@ -757,51 +718,37 @@ class Phase1SlackBot:
     async def start(self) -> None:
         """Start the Slack bot."""
         await self.initialize_bot_info()
-        logging.info("🚀 Starting Phase 1 Slack bot...")
+        logging.info("Starting Slack bot...")
         # Start Socket Mode handler in background
         asyncio.create_task(self.socket_mode_handler.start_async())
-        logging.info("✅ Phase 1 Slack bot started and waiting for messages")
-        logging.info("📱 Try mentioning the bot in a channel or sending it a DM!")
     
     async def cleanup(self) -> None:
         """Clean up resources."""
         try:
             if hasattr(self, "socket_mode_handler"):
                 await self.socket_mode_handler.close_async()
-            logging.info("🔄 Slack socket mode handler closed")
         except Exception as e:
             logging.error(f"Error closing socket mode handler: {e}")
 
 
-def main():  # Entry point for the bot
+def main():
     """Main function to setup and run the bot."""
-    print("🚀 Phase 1 Slack Bot - Complete Setup")
-    print("=" * 50)
-    
     # Setup environment
     env_setup = EnvironmentSetup()
     
     # Create .env if missing
     if not env_setup.create_env_file_if_missing():
-        print("\n❌ Please edit the .env file with your Slack tokens and run again.")
-        print("\nGet your tokens from:")
-        print("1. Bot Token: https://api.slack.com/apps → Your App → OAuth & Permissions")
-        print("2. App Token: https://api.slack.com/apps → Your App → Basic Information → App-Level Tokens")
+        logging.error("Please edit the .env file with your Slack tokens and run again.")
+        logging.info("Get tokens from: https://api.slack.com/apps → Your App")
         return
     
     # Validate environment
     slack_bot_token, slack_app_token = env_setup.validate_environment()
     if not slack_bot_token or not slack_app_token:
-        print("\n❌ Environment validation failed. Please check your .env file.")
+        logging.error("Environment validation failed. Please check your .env file.")
         return
     
-    print("\n✅ Environment validation passed!")
-    print("\n📋 Slack App Requirements:")
-    print("   • App Home enabled")
-    print("   • Socket Mode enabled")
-    print("   • Bot scopes: app_mentions:read, channels:history, chat:write, im:history, im:write, commands")
-    print("   • Slash commands: /bot-settings, /bot-help")
-    print("\n🎯 Starting bot...")
+    logging.info("Starting Phase 1 Slack Bot...")
     
     async def run_bot():
         """Run the bot with proper error handling."""
@@ -813,9 +760,9 @@ def main():  # Entry point for the bot
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
-            logging.info("🔄 Shutting down...")
+            logging.info("Shutting down...")
         except Exception as e:
-            logging.error(f"❌ Bot error: {e}")
+            logging.error(f"Bot error: {e}")
         finally:
             await bot.cleanup()
     
@@ -823,9 +770,9 @@ def main():  # Entry point for the bot
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
-        print("\n🔄 Bot stopped by user")
+        logging.info("Bot stopped by user")
     except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
+        logging.error(f"Fatal error: {e}")
 
 
 if __name__ == "__main__":
