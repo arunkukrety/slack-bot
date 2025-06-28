@@ -52,7 +52,6 @@ def verify_and_install_dependencies():
 verify_and_install_dependencies()
 
 # Now import the packages
-from dotenv import load_dotenv
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
@@ -65,8 +64,10 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (only in local development)
+if os.environ.get("ENV", "local") == "local":
+    from dotenv import load_dotenv
+    load_dotenv()
 
 
 class EnvironmentSetup:
