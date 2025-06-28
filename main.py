@@ -57,6 +57,7 @@ from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from aiohttp import web
 
 # Configure logging
 logging.basicConfig(
@@ -165,6 +166,8 @@ class Phase1SlackBot:
         self.client = AsyncWebClient(token=slack_bot_token)
         self.settings = BotSettings()
         self.bot_id = None
+        self.health_app = None
+        self.health_runner = None
         
         # Set up event handlers
         self.app.event("app_mention")(self.handle_mention)
@@ -184,6 +187,9 @@ class Phase1SlackBot:
         self.app.command("/bot-settings")(self.handle_settings_command)
         self.app.command("/bot-help")(self.handle_help_command)
         self.app.command("/bot-debug")(self.handle_debug_command)
+        
+        # Setup health check server
+        self._setup_health_server()
     
     async def initialize_bot_info(self) -> None:
         """Get the bot's ID and other info."""
@@ -715,10 +721,55 @@ class Phase1SlackBot:
             except:
                 pass
     
+    def _setup_health_server(self):
+        """Setup aiohttp health check server."""
+        self.health_app = web.Application()
+        self.health_app.router.add_get('/health', self.health_check)
+        self.health_app.router.add_get('/', self.health_check)  # Root endpoint too
+    
+    async def health_check(self, request):
+        """Health check endpoint to keep the bot alive."""
+        import time
+        
+        # Get current settings
+        settings = self.settings.load_settings()
+        
+        # Create health status
+        health_data = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "bot_id": self.bot_id,
+            "settings": settings,
+            "uptime": "running"
+        }
+        
+        return web.json_response(health_data)
+    
+    async def start_health_server(self, port=8080):
+        """Start the health check server."""
+        try:
+            from aiohttp.web_runner import AppRunner, TCPSite
+            
+            self.health_runner = AppRunner(self.health_app)
+            await self.health_runner.setup()
+            
+            site = TCPSite(self.health_runner, 'localhost', port)
+            await site.start()
+            
+            logging.info(f"Health check server started on http://localhost:{port}/health")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to start health server: {e}")
+            return False
+
     async def start(self) -> None:
-        """Start the Slack bot."""
+        """Start the Slack bot and health server."""
         await self.initialize_bot_info()
         logging.info("Starting Slack bot...")
+        
+        # Start health check server
+        await self.start_health_server()
+        
         # Start Socket Mode handler in background
         asyncio.create_task(self.socket_mode_handler.start_async())
     
@@ -729,6 +780,13 @@ class Phase1SlackBot:
                 await self.socket_mode_handler.close_async()
         except Exception as e:
             logging.error(f"Error closing socket mode handler: {e}")
+        
+        try:
+            if self.health_runner:
+                await self.health_runner.cleanup()
+                logging.info("Health server stopped")
+        except Exception as e:
+            logging.error(f"Error stopping health server: {e}")
 
 
 def main():

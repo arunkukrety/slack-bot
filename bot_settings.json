@@ -1,5 +1,5 @@
 {
-  "reply_in_thread": false,
-  "mention_only": false,
+  "reply_in_thread": true,
+  "mention_only": true,
   "auto_respond": true
 }
