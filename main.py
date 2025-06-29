@@ -727,18 +727,20 @@ class Phase1SlackBot:
         
         return web.json_response(health_data)
     
-    async def start_health_server(self, port=8080):
-        """Start the health check server."""
+    async def start_health_server(self):
+        """Start the health check server, binding to 0.0.0.0 and using PORT env var."""
+        port = int(os.getenv('PORT', 8080))
+        host = '0.0.0.0'
         try:
             from aiohttp.web_runner import AppRunner, TCPSite
             
             self.health_runner = AppRunner(self.health_app)
             await self.health_runner.setup()
             
-            site = TCPSite(self.health_runner, 'localhost', port)
+            site = TCPSite(self.health_runner, host, port)
             await site.start()
             
-            logging.info(f"Health check server started on http://localhost:{port}/health")
+            logging.info(f"Health check server started on http://{host}:{port}/health")
             return True
         except Exception as e:
             logging.error(f"Failed to start health server: {e}")
