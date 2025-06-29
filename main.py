@@ -10,11 +10,11 @@ A comprehensive Slack bot that:
 - Single file - just run and go!
 
 Usage:
-    python phase1.py
+    python main.py
 
 Requirements:
-    - SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env file
-    - slack-bolt and python-dotenv packages
+    - SLACK_BOT_TOKEN and SLACK_APP_TOKEN as environment variables
+    - slack-bolt and aiohttp packages
 """
 
 import asyncio
@@ -30,7 +30,7 @@ def verify_and_install_dependencies():
     """Verify and install required dependencies."""
     required_packages = {
         'slack_bolt': 'slack-bolt>=1.15.0',
-        'dotenv': 'python-dotenv>=0.19.0'
+        'aiohttp': 'aiohttp>=3.8.1'
     }
     
     missing_packages = []
@@ -65,26 +65,8 @@ logging.basicConfig(
 )
 
 
-from dotenv import load_dotenv
-load_dotenv()
-
-
 class EnvironmentSetup:
     """Handles environment setup and validation."""
-    
-    @staticmethod
-    def create_env_file_if_missing():
-        """Create .env file with template if it doesn't exist."""
-        env_file = ".env"
-        if not os.path.exists(env_file):
-            env_template = """# Slack Bot Tokens - Replace with your actual tokens
-SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-SLACK_APP_TOKEN=xapp-your-app-token-here
-"""
-            with open(env_file, 'w') as f:
-                f.write(env_template)
-            return False
-        return True
     
     @staticmethod
     def validate_environment() -> tuple[Optional[str], Optional[str]]:
@@ -92,12 +74,12 @@ SLACK_APP_TOKEN=xapp-your-app-token-here
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
         slack_app_token = os.getenv("SLACK_APP_TOKEN")
         
-        if not slack_bot_token or slack_bot_token == "xoxb-your-bot-token-here":
-            logging.error("SLACK_BOT_TOKEN not set or using template value")
+        if not slack_bot_token or not slack_bot_token.startswith("xoxb-"):
+            logging.error("SLACK_BOT_TOKEN is missing or invalid.")
             return None, None
             
-        if not slack_app_token or slack_app_token == "xapp-your-app-token-here":
-            logging.error("SLACK_APP_TOKEN not set or using template value")
+        if not slack_app_token or not slack_app_token.startswith("xapp-"):
+            logging.error("SLACK_APP_TOKEN is missing or invalid.")
             return None, None
         
         return slack_bot_token, slack_app_token
@@ -533,8 +515,8 @@ class Phase1SlackBot:
                     user=body["user_id"],
                     text=f":x: Debug command error: {str(e)}"
                 )
-            except Exception as fallback_error:
-                logging.error(f"Error in debug command fallback: {fallback_error}")
+            except Exception:
+                pass
     
     async def handle_settings_button(self, ack, body, client):
         """Handle the settings button click to open modal."""
@@ -794,16 +776,10 @@ def main():
     # Setup environment
     env_setup = EnvironmentSetup()
     
-    # Create .env if missing
-    if not env_setup.create_env_file_if_missing():
-        logging.error("Please edit the .env file with your Slack tokens and run again.")
-        logging.info("Get tokens from: https://api.slack.com/apps → Your App")
-        return
-    
     # Validate environment
     slack_bot_token, slack_app_token = env_setup.validate_environment()
     if not slack_bot_token or not slack_app_token:
-        logging.error("Environment validation failed. Please check your .env file.")
+        logging.error("Environment validation failed. Please set SLACK_BOT_TOKEN and SLACK_APP_TOKEN.")
         return
     
     logging.info("Starting Phase 1 Slack Bot...")
