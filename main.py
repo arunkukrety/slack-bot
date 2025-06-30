@@ -30,6 +30,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from src.llm_models import LLM_MODELS, get_model_display_name, get_model_options
+from src.Supabase import log_message_to_supabase
 
 # Configure logging
 logging.basicConfig(
@@ -44,10 +45,8 @@ class EnvironmentSetup:
     @staticmethod
     def load_env_file():
         """Load .env file if it exists (for local development only)."""
-        # Look for .env in the root directory (where main.py is)
         root_dir = os.path.dirname(os.path.abspath(__file__))
         env_file = os.path.join(root_dir, ".env")
-        
         if os.path.exists(env_file):
             try:
                 with open(env_file, 'r') as f:
@@ -59,29 +58,28 @@ class EnvironmentSetup:
                             value = value.strip().strip('"').strip("'")
                             if key and value:
                                 os.environ[key] = value
-                logging.info(f"Loaded environment variables from {env_file}")
+                logging.info(f"[Env] Loaded environment variables from {env_file}")
             except Exception as e:
-                logging.warning(f"Could not load .env file: {e}")
+                logging.warning(f"[Env] Could not load .env file: {e}")
         else:
-            logging.info("No .env file found, using system environment variables")
+            logging.info("[Env] No .env file found, using system environment variables")
     
     @staticmethod
     def validate_environment() -> Tuple[Optional[str], Optional[str]]:
         """Validate environment variables and return tokens."""
-        # Load .env file for local development
         EnvironmentSetup.load_env_file()
-        
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
         slack_app_token = os.getenv("SLACK_APP_TOKEN")
-        
+        open_router_key = os.getenv("OPEN_ROUTER_KEY")
+        logging.info(f"[Env] SLACK_BOT_TOKEN present: {bool(slack_bot_token)}")
+        logging.info(f"[Env] SLACK_APP_TOKEN present: {bool(slack_app_token)}")
+        logging.info(f"[Env] OPEN_ROUTER_KEY present: {bool(open_router_key)}")
         if not slack_bot_token or not slack_bot_token.startswith("xoxb-"):
-            logging.error("SLACK_BOT_TOKEN is missing or invalid.")
+            logging.error("[Env] SLACK_BOT_TOKEN is missing or invalid.")
             return None, None
-            
         if not slack_app_token or not slack_app_token.startswith("xapp-"):
-            logging.error("SLACK_APP_TOKEN is missing or invalid.")
+            logging.error("[Env] SLACK_APP_TOKEN is missing or invalid.")
             return None, None
-        
         return slack_bot_token, slack_app_token
 
 
@@ -131,7 +129,6 @@ class BotSettings:
     
     def set(self, key: str, value: Any) -> None:
         """Set a setting value and save."""
-        # Allow setting llm_model even if not in default_settings initially
         if key in self.default_settings or key == "llm_model":
             self.settings[key] = value
             self.save_settings()
@@ -139,85 +136,6 @@ class BotSettings:
             logging.info(f"Setting '{key}' updated to '{value}'")
         else:
             raise ValueError(f"Unknown setting: {key}")
-
-
-class AIService:
-    """Handles AI-powered responses using OpenRouter."""
-    
-    def __init__(self, settings=None):
-        self.api_key = os.getenv("OPEN_ROUTER_KEY")
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.settings = settings
-        self.default_model = "meta-llama/llama-3.3-70b-instruct:free" 
-        
-        if not self.api_key:
-            logging.warning("OPEN_ROUTER_KEY not found.")
-    
-    def get_current_model(self) -> str:
-        """Get the current model from settings or default."""
-        if self.settings:
-            return self.settings.get("llm_model", self.default_model)
-        return self.default_model
-    
-    async def get_response(self, user_message: str, user_id: str = None) -> Optional[str]:
-        """Get AI response from OpenRouter."""
-        if not self.api_key:
-            return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
-        
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "X-Title": "Slack Bot"
-            }
-            
-            payload = {
-                "model": self.get_current_model(),
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a helpful Slack bot assistant. Keep responses concise, "
-                            "friendly, and appropriate for workplace communication. "
-                            "Use emojis sparingly and professionally."
-                        )
-                    },
-                    {
-                        "role": "user", 
-                        "content": user_message
-                    }
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.base_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    
-                    if response.status == 200:
-                        data = await response.json()
-                        ai_response = data["choices"][0]["message"]["content"]
-                        return ai_response.strip()
-                    else:
-                        error_text = await response.text()
-                        logging.error(f"OpenRouter API error {response.status}: {error_text}")
-                        return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
-                        
-        except aiohttp.ClientError as e:
-            logging.error(f"Network error calling OpenRouter: {e}")
-            return "Hello World! 🌐 (Network issue - please try again)"
-        except Exception as e:
-            logging.error(f"Unexpected error in AI service: {e}")
-            return "Hello World! ⚠️ (Something went wrong)"
-    
-    def is_available(self) -> bool:
-        """Check if AI service is available."""
-        return bool(self.api_key)
 
 
 class HealthServer:
@@ -279,7 +197,7 @@ class EventHandlers:
     
     def __init__(self, bot):
         self.bot = bot
-        self.ai_service = AIService(self.bot.settings)
+        self.ai_service = bot.ai_service
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -296,23 +214,32 @@ class EventHandlers:
         self.bot.app.action("auto_respond_setting")(self.handle_checkbox_action)
     
     async def handle_mention(self, event, say):
-        """Handle mentions of the bot in channels."""
+        """Handle app_mention events."""
+        logging.info(f"[Event] Recognized mention event: ts={event.get('ts')}, channel={event.get('channel')}")
+        await log_message_to_supabase(event, self.bot.client, msg_type="incoming")
         await self._send_ai_response(event, say)
-    
+        logging.info(f"[Slack] Finished processing mention event: {event.get('ts')}")
+
     async def handle_message(self, message, say):
-        """Handle direct messages to the bot."""
-        if message.get("channel_type") == "im" and not message.get("subtype"):
-            text = message.get("text", "").lower().strip()
-            
-            if any(keyword in text for keyword in ["settings", "config", "setup"]):
-                await self._send_settings_info(message, say)
-            elif any(keyword in text for keyword in ["help", "commands"]):
-                await self._send_help_info(message, say)
-            elif self.bot.settings.get("auto_respond"):
-                await self._send_ai_response(message, say)
+        """Handle message events."""
+        logging.info(f"[Event] Recognized message event: ts={message.get('ts')}, channel={message.get('channel')}, thread_ts={message.get('thread_ts')}")
+        await log_message_to_supabase(message, self.bot.client, msg_type="incoming")
+        
+        # Only reply if bot is mentioned or in DM with auto_respond enabled
+        bot_mention = False
+        bot_id = self.bot.bot_id
+        text = message.get("text", "")
+        if bot_id and f"<@{bot_id}>" in text:
+            bot_mention = True
+        is_dm = message.get("channel_type") == "im"
+        auto_respond = self.bot.settings.get("auto_respond")
+        if bot_mention or (is_dm and auto_respond):
+            await self._send_ai_response(message, say)
+        logging.info(f"[Slack] Finished processing message event: {message.get('ts')}")
     
     async def handle_home_opened(self, event, client):
-        """Handle when a user opens the App Home tab."""
+        """Handle app_home_opened events."""
+        logging.info(f"[Event] Home opened event: {event}")
         user_id = event["user"]
         settings = self.bot.settings.settings
         
@@ -361,19 +288,21 @@ class EventHandlers:
     async def handle_settings_button(self, ack, body, client):
         """Handle settings button click."""
         await ack()
+        logging.info(f"[Event] Settings button clicked: {body}")
         try:
             await self.bot.commands._open_settings_modal(body["trigger_id"], client, body["user"]["id"])
         except Exception as e:
-            logging.error(f"Error opening settings modal: {e}")
+            logging.error(f"[Event] Error opening settings modal: {e}")
     
     async def handle_checkbox_action(self, ack, body):
         """Handle checkbox interactions."""
         await ack()
+        logging.info(f"[Event] Checkbox action: {body}")
     
     async def handle_settings_submission(self, ack, body, client):
         """Handle settings modal submission."""
         await ack()
-        
+        logging.info(f"[Event] Settings submission: {body}")
         try:
             values = body["view"]["state"]["values"]
             
@@ -391,8 +320,9 @@ class EventHandlers:
                 text="✅ Settings updated successfully! Changes take effect immediately."
             )
             
+            logging.info(f"[Event] Settings updated for user {user_id}")
         except Exception as e:
-            logging.error(f"Error handling settings submission: {e}")
+            logging.error(f"[Event] Error handling settings submission: {e}")
     
     async def _send_ai_response(self, event, say):
         """Send AI-powered response based on settings."""
@@ -419,20 +349,23 @@ class EventHandlers:
             if not (self.bot.bot_id and f"<@{self.bot.bot_id}>" in text):
                 return
         
-        if not settings.get("auto_respond"):
-            return
-        
         thread_ts = None
         if settings.get("reply_in_thread"):
             thread_ts = event.get("thread_ts", event.get("ts"))
         
         try:
-            # Get AI response
             ai_response = await self.ai_service.get_response(user_message, user_id)
+            outgoing_message_data = {
+                "ts": str(time.time()),  # Unique timestamp for outgoing message
+                "thread_ts": thread_ts,
+                "user": self.bot.bot_id,
+                "channel": event.get("channel"),
+                "text": ai_response
+            }
+            await log_message_to_supabase(outgoing_message_data, self.bot.client, msg_type="outgoing")
             await say(text=ai_response, thread_ts=thread_ts)
         except Exception as e:
-            logging.error(f"Error sending AI response: {e}")
-            # Fallback to simple response
+            logging.error(f"[Event] Error sending AI response: {e}")
             await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts)
     
     async def _send_settings_info(self, message, say):
@@ -448,9 +381,10 @@ class EventHandlers:
         )
         
         try:
+            logging.info(f"[Event] Sending settings info: {text}")
             await say(text=text)
         except Exception as e:
-            logging.error(f"Error sending settings info: {e}")
+            logging.error(f"[Event] Error sending settings info: {e}")
     
     async def _send_help_info(self, message, say):
         """Send help info via DM."""
@@ -474,9 +408,83 @@ class EventHandlers:
         )
         
         try:
+            logging.info(f"[Event] Sending help info: {text}")
             await say(text=text)
         except Exception as e:
-            logging.error(f"Error sending help info: {e}")
+            logging.error(f"[Event] Error sending help info: {e}")
+
+
+class AIService:
+    """Handles AI-powered responses using OpenRouter."""
+    
+    def __init__(self, settings=None):
+        self.api_key = os.getenv("OPEN_ROUTER_KEY")
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.settings = settings
+        self.default_model = "meta-llama/llama-3.3-70b-instruct:free" 
+        if not self.api_key:
+            logging.warning("[AIService] OPEN_ROUTER_KEY not found or empty!")
+        else:
+            logging.info(f"[AIService] OPEN_ROUTER_KEY loaded: {self.api_key[:8]}...{'*' * (len(self.api_key)-12)}...{self.api_key[-4:]}")
+    
+    def get_current_model(self) -> str:
+        if self.settings:
+            return self.settings.get("llm_model", self.default_model)
+        return self.default_model
+    
+    async def get_response(self, user_message: str, user_id: str = None) -> Optional[str]:
+        if not self.api_key:
+            logging.error("[AIService] OPEN_ROUTER_KEY is missing at get_response!")
+            return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "X-Title": "Slack Bot"
+            }
+            payload = {
+                "model": self.get_current_model(),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful Slack bot assistant. Keep responses concise, "
+                            "friendly, and appropriate for workplace communication. "
+                            "Use emojis sparingly and professionally."
+                        )
+                    },
+                    {
+                        "role": "user", 
+                        "content": user_message
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        ai_response = data["choices"][0]["message"]["content"]
+                        return ai_response.strip()
+                    else:
+                        error_text = await response.text()
+                        logging.error(f"OpenRouter API error {response.status}: {error_text}")
+                        return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
+        except aiohttp.ClientError as e:
+            logging.error(f"Network error calling OpenRouter: {e}")
+            return "Hello World! 🌐 (Network issue - please try again)"
+        except Exception as e:
+            logging.error(f"Unexpected error in AI service: {e}")
+            return "Hello World! ⚠️ (Something went wrong)"
+    
+    def is_available(self) -> bool:
+        return bool(self.api_key)
 
 
 class SlackBot:
@@ -488,7 +496,8 @@ class SlackBot:
         self.client = AsyncWebClient(token=slack_bot_token)
         self.settings = BotSettings()
         self.bot_id = None
-        self.ai_service = AIService(self.settings)  # Attach ai_service for slash_commands
+        self.bot_name = "Unknown"
+        self.ai_service = AIService(self.settings)
         
         # Initialize modules
         from src.slash_commands import SlashCommands
@@ -501,8 +510,8 @@ class SlackBot:
         try:
             auth_info = await self.client.auth_test()
             self.bot_id = auth_info["user_id"]
-            bot_name = auth_info.get("user", "Unknown")
-            logging.info(f"Bot initialized: {bot_name} (ID: {self.bot_id})")
+            self.bot_name = auth_info.get("user", "Unknown")
+            logging.info(f"Bot initialized: {self.bot_name} (ID: {self.bot_id})")
         except Exception as e:
             logging.error(f"Failed to get bot info: {e}")
             self.bot_id = None
@@ -526,11 +535,12 @@ class SlackBot:
         await self.health.cleanup()
 
 
+EnvironmentSetup.load_env_file()
+
+
 def main():
     """Main entry point."""
-    env_setup = EnvironmentSetup()
-    
-    slack_bot_token, slack_app_token = env_setup.validate_environment()
+    slack_bot_token, slack_app_token = EnvironmentSetup.validate_environment()
     if not slack_bot_token or not slack_app_token:
         logging.error("Environment validation failed. Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN.")
         return
