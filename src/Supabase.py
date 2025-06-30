@@ -69,7 +69,7 @@ def slack_ts_to_iso(ts: str) -> str:
         logging.error(f"[Supabase] Failed to convert ts '{ts}' to ISO: {e}")
         return None
 
-async def log_message_to_supabase(msg: dict, client: AsyncWebClient, msg_type: str = "incoming"):
+async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str, msg_type: str = "incoming"):
     """Log a Slack message to Supabase, including user name."""
     logging.debug(f"Raw message: {msg}")
     supabase = get_supabase_client()
@@ -83,7 +83,7 @@ async def log_message_to_supabase(msg: dict, client: AsyncWebClient, msg_type: s
         return
 
     user_id = msg.get("user") or "unknown"
-    user_name = await get_user_name(client, client.bot_user_id if msg_type == "outgoing" else user_id)
+    user_name = await get_user_name(client, bot_id if msg_type == "outgoing" else user_id)
 
     logging.info(f"[Supabase] Logging message: ts={ts}, type={msg_type}, channel={msg.get('channel')}, user={user_name}")
     iso_timestamp = slack_ts_to_iso(ts)

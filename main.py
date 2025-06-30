@@ -30,7 +30,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from src.llm_models import LLM_MODELS, get_model_display_name, get_model_options
-from src.Supabase import log_message_to_supabase
+from src.supabase import log_message_to_supabase
 
 # Configure logging
 logging.basicConfig(
@@ -216,27 +216,30 @@ class EventHandlers:
     async def handle_mention(self, event, say):
         """Handle app_mention events."""
         logging.info(f"[Event] Recognized mention event: ts={event.get('ts')}, channel={event.get('channel')}")
-        await log_message_to_supabase(event, self.bot.client, msg_type="incoming")
+        await log_message_to_supabase(event, self.bot.client, self.bot.bot_id, msg_type="incoming")
         await self._send_ai_response(event, say)
         logging.info(f"[Slack] Finished processing mention event: {event.get('ts')}")
 
     async def handle_message(self, message, say):
         """Handle message events."""
         logging.info(f"[Event] Recognized message event: ts={message.get('ts')}, channel={message.get('channel')}, thread_ts={message.get('thread_ts')}")
-        await log_message_to_supabase(message, self.bot.client, msg_type="incoming")
-        
-        # Only reply if bot is mentioned or in DM with auto_respond enabled
-        bot_mention = False
+        await log_message_to_supabase(message, self.bot.client, self.bot.bot_id, msg_type="incoming")
+
+        # Skip messages with bot mention (handled by handle_mention)
         bot_id = self.bot.bot_id
         text = message.get("text", "")
-        if bot_id and f"<@{bot_id}>" in text:
-            bot_mention = True
+        bot_mention = bot_id and f"<@{bot_id}>" in text
+        if bot_mention:
+            logging.debug(f"[Event] Skipping message with bot mention in channel, handled by app_mention: ts={message.get('ts')}")
+            return
+
+        # Only reply in DMs if auto_respond is enabled
         is_dm = message.get("channel_type") == "im"
         auto_respond = self.bot.settings.get("auto_respond")
-        if bot_mention or (is_dm and auto_respond):
+        if is_dm and auto_respond:
             await self._send_ai_response(message, say)
         logging.info(f"[Slack] Finished processing message event: {message.get('ts')}")
-    
+
     async def handle_home_opened(self, event, client):
         """Handle app_home_opened events."""
         logging.info(f"[Event] Home opened event: {event}")
@@ -345,7 +348,8 @@ class EventHandlers:
         if not user_message:
             user_message = "Hello!"
         
-        if settings.get("mention_only") and channel_type != "im":
+        # Only respond in channels if mention_only is False
+        if channel_type != "im" and settings.get("mention_only"):
             if not (self.bot.bot_id and f"<@{self.bot.bot_id}>" in text):
                 return
         
@@ -362,11 +366,11 @@ class EventHandlers:
                 "channel": event.get("channel"),
                 "text": ai_response
             }
-            await log_message_to_supabase(outgoing_message_data, self.bot.client, msg_type="outgoing")
+            await log_message_to_supabase(outgoing_message_data, self.bot.client, self.bot.bot_id, msg_type="outgoing")
             await say(text=ai_response, thread_ts=thread_ts)
         except Exception as e:
             logging.error(f"[Event] Error sending AI response: {e}")
-            await say(text="Hello World! 🤖 ({e})", thread_ts=thread_ts)
+            await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts)
     
     async def _send_settings_info(self, message, say):
         """Send settings info via DM."""
@@ -470,17 +474,21 @@ class AIService:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
+                        logging.debug(f"[AIService] OpenRouter response: {data}")
+                        if "choices" not in data:
+                            logging.error(f"[AIService] No 'choices' in response: {data}")
+                            return "Sorry, I couldn't process the response. Please try again later! 🤔"
                         ai_response = data["choices"][0]["message"]["content"]
                         return ai_response.strip()
                     else:
                         error_text = await response.text()
-                        logging.error(f"OpenRouter API error {response.status}: {error_text}")
+                        logging.error(f"[AIService] OpenRouter API error {response.status}: {error_text}")
                         return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
         except aiohttp.ClientError as e:
-            logging.error(f"Network error calling OpenRouter: {e}")
+            logging.error(f"[AIService] Network error calling OpenRouter: {e}")
             return "Hello World! 🌐 (Network issue - please try again)"
         except Exception as e:
-            logging.error(f"Unexpected error in AI service: {e}")
+            logging.error(f"[AIService] Unexpected error in AI service: {e}")
             return "Hello World! ⚠️ (Something went wrong)"
     
     def is_available(self) -> bool:
