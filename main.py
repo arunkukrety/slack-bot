@@ -1,76 +1,76 @@
 #!/usr/bin/env python3
 """
-Phase 1 - Complete Slack Bot with Settings and Slash Commands
+AI Slack Bot - Production Ready
 
-A comprehensive Slack bot that:
-- Responds with "Hello World" when mentioned
-- Includes configurable settings via Slack UI
-- Supports slash commands for settings and help
-- Auto-verifies setup and dependencies
-- Single file - just run and go!
+A clean, modular Slack bot powered by OpenRouter AI.
+Provides intelligent responses, configurable settings, and health monitoring.
 
 Usage:
     python main.py
 
-Requirements:
-    - SLACK_BOT_TOKEN and SLACK_APP_TOKEN as environment variables
-    - slack-bolt and aiohttp packages
+Environment Variables:
+    SLACK_BOT_TOKEN - Bot token (xoxb-...)
+    SLACK_APP_TOKEN - App token (xapp-...)
+    OPEN_ROUTER_KEY - OpenRouter API key (sk-or-...)
+    PORT - Health server port (default: 8080)
 """
 
 import asyncio
-import json
 import logging
 import os
-import subprocess
-import sys
-from typing import Dict, Any, Optional
+import time
+import json
+import aiohttp
+from typing import Optional, Tuple, Dict, Any
+from aiohttp import web
+from aiohttp.web_runner import AppRunner, TCPSite
 
-# Setup verification and dependency installation
-def verify_and_install_dependencies():
-    """Verify and install required dependencies."""
-    required_packages = {
-        'slack_bolt': 'slack-bolt>=1.15.0',
-        'aiohttp': 'aiohttp>=3.8.1'
-    }
-    
-    missing_packages = []
-    
-    for package, pip_name in required_packages.items():
-        try:
-            __import__(package)
-        except ImportError:
-            missing_packages.append(pip_name)
-    
-    if missing_packages:
-        try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + missing_packages)
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to install packages: {e}")
-            sys.exit(1)
-
-# Verify dependencies first
-verify_and_install_dependencies()
-
-# Now import the packages
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
-from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
-from aiohttp import web
+
+from src.llm_models import LLM_MODELS, get_model_display_name, get_model_options
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 
 class EnvironmentSetup:
-    """Handles environment setup and validation."""
+    """Handles environment variable setup and validation."""
     
     @staticmethod
-    def validate_environment() -> tuple[Optional[str], Optional[str]]:
+    def load_env_file():
+        """Load .env file if it exists (for local development only)."""
+        # Look for .env in the root directory (where main.py is)
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        env_file = os.path.join(root_dir, ".env")
+        
+        if os.path.exists(env_file):
+            try:
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, value = line.split('=', 1)
+                            key = key.strip()
+                            value = value.strip().strip('"').strip("'")
+                            if key and value:
+                                os.environ[key] = value
+                logging.info(f"Loaded environment variables from {env_file}")
+            except Exception as e:
+                logging.warning(f"Could not load .env file: {e}")
+        else:
+            logging.info("No .env file found, using system environment variables")
+    
+    @staticmethod
+    def validate_environment() -> Tuple[Optional[str], Optional[str]]:
         """Validate environment variables and return tokens."""
+        # Load .env file for local development
+        EnvironmentSetup.load_env_file()
+        
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
         slack_app_token = os.getenv("SLACK_APP_TOKEN")
         
@@ -91,9 +91,10 @@ class BotSettings:
     def __init__(self, settings_file: str = "bot_settings.json"):
         self.settings_file = settings_file
         self.default_settings = {
-            "reply_in_thread": True,  # Whether to reply in thread or as new message
-            "mention_only": True,     # Whether to respond only when mentioned or in any thread
-            "auto_respond": True      # Whether the bot should respond automatically
+            "reply_in_thread": True,
+            "mention_only": True,
+            "auto_respond": True,
+            "llm_model": "meta-llama/llama-3.3-70b-instruct:free"
         }
         self.settings = self.load_settings()
     
@@ -103,7 +104,6 @@ class BotSettings:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r') as f:
                     settings = json.load(f)
-                # Ensure all default keys exist
                 for key, value in self.default_settings.items():
                     if key not in settings:
                         settings[key] = value
@@ -123,206 +123,209 @@ class BotSettings:
         except Exception as e:
             logging.error(f"Error saving settings: {e}")
     
-    def get(self, key: str) -> Any:
-        """Get a setting value."""
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a setting value with optional default."""
+        if default is not None:
+            return self.settings.get(key, default)
         return self.settings.get(key, self.default_settings.get(key))
     
     def set(self, key: str, value: Any) -> None:
         """Set a setting value and save."""
-        if key in self.default_settings:
+        # Allow setting llm_model even if not in default_settings initially
+        if key in self.default_settings or key == "llm_model":
             self.settings[key] = value
             self.save_settings()
-            # Reload settings to ensure they're in sync with the file
             self.settings = self.load_settings()
-            logging.info(f"Setting '{key}' updated to '{value}' and reloaded from file")
+            logging.info(f"Setting '{key}' updated to '{value}'")
         else:
             raise ValueError(f"Unknown setting: {key}")
 
 
-class Phase1SlackBot:
-    """A complete Phase 1 Slack bot with Hello World responses and configurable settings."""
+class AIService:
+    """Handles AI-powered responses using OpenRouter."""
     
-    def __init__(self, slack_bot_token: str, slack_app_token: str):
-        self.app = AsyncApp(token=slack_bot_token)
-        self.socket_mode_handler = AsyncSocketModeHandler(self.app, slack_app_token)
-        self.client = AsyncWebClient(token=slack_bot_token)
-        self.settings = BotSettings()
-        self.bot_id = None
-        self.health_app = None
-        self.health_runner = None
+    def __init__(self, settings=None):
+        self.api_key = os.getenv("OPEN_ROUTER_KEY")
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.settings = settings
+        self.default_model = "meta-llama/llama-3.3-70b-instruct:free" 
         
-        # Set up event handlers
-        self.app.event("app_mention")(self.handle_mention)
-        self.app.message()(self.handle_message)
-        self.app.event("app_home_opened")(self.handle_home_opened)
-        
-        # Settings management
-        self.app.action("settings_button")(self.handle_settings_button)
-        self.app.view("settings_modal")(self.handle_settings_submission)
-        
-        # Block actions for checkbox interactions in modal
-        self.app.action("reply_in_thread_setting")(self.handle_checkbox_action)
-        self.app.action("mention_only_setting")(self.handle_checkbox_action)
-        self.app.action("auto_respond_setting")(self.handle_checkbox_action)
-        
-        # Slash commands
-        self.app.command("/bot-settings")(self.handle_settings_command)
-        self.app.command("/bot-help")(self.handle_help_command)
-        self.app.command("/bot-debug")(self.handle_debug_command)
-        
-        # Setup health check server
-        self._setup_health_server()
+        if not self.api_key:
+            logging.warning("OPEN_ROUTER_KEY not found.")
     
-    async def initialize_bot_info(self) -> None:
-        """Get the bot's ID and other info."""
+    def get_current_model(self) -> str:
+        """Get the current model from settings or default."""
+        if self.settings:
+            return self.settings.get("llm_model", self.default_model)
+        return self.default_model
+    
+    async def get_response(self, user_message: str, user_id: str = None) -> Optional[str]:
+        """Get AI response from OpenRouter."""
+        if not self.api_key:
+            return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
+        
         try:
-            auth_info = await self.client.auth_test()
-            self.bot_id = auth_info["user_id"]
-            bot_name = auth_info.get("user", "Unknown")
-            logging.info(f"Bot initialized: {bot_name} (ID: {self.bot_id})")
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "X-Title": "Slack Bot"
+            }
+            
+            payload = {
+                "model": self.get_current_model(),
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful Slack bot assistant. Keep responses concise, "
+                            "friendly, and appropriate for workplace communication. "
+                            "Use emojis sparingly and professionally."
+                        )
+                    },
+                    {
+                        "role": "user", 
+                        "content": user_message
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        ai_response = data["choices"][0]["message"]["content"]
+                        return ai_response.strip()
+                    else:
+                        error_text = await response.text()
+                        logging.error(f"OpenRouter API error {response.status}: {error_text}")
+                        return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
+                        
+        except aiohttp.ClientError as e:
+            logging.error(f"Network error calling OpenRouter: {e}")
+            return "Hello World! 🌐 (Network issue - please try again)"
         except Exception as e:
-            logging.error(f"Failed to get bot info: {e}")
-            self.bot_id = None
+            logging.error(f"Unexpected error in AI service: {e}")
+            return "Hello World! ⚠️ (Something went wrong)"
+    
+    def is_available(self) -> bool:
+        """Check if AI service is available."""
+        return bool(self.api_key)
+
+
+class HealthServer:
+    """Handles health check endpoint for deployment monitoring."""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.app = None
+        self.runner = None
+        self.setup_server()
+    
+    def setup_server(self):
+        """Setup aiohttp health server."""
+        self.app = web.Application()
+        self.app.router.add_get('/health', self.health_check)
+        self.app.router.add_get('/', self.health_check)
+    
+    async def health_check(self, request):
+        """Health check endpoint."""
+        health_data = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "bot_id": self.bot.bot_id,
+            "settings": self.bot.settings.load_settings(),
+            "uptime": "running"
+        }
+        return web.json_response(health_data)
+    
+    async def start(self):
+        """Start health server on PORT env var or 8080."""
+        port = int(os.getenv('PORT', 8080))
+        host = '0.0.0.0'
+        
+        try:
+            self.runner = AppRunner(self.app)
+            await self.runner.setup()
+            
+            site = TCPSite(self.runner, host, port)
+            await site.start()
+            
+            logging.info(f"Health server started on http://{host}:{port}/health")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to start health server: {e}")
+            return False
+    
+    async def cleanup(self):
+        """Stop health server."""
+        try:
+            if self.runner:
+                await self.runner.cleanup()
+                logging.info("Health server stopped")
+        except Exception as e:
+            logging.error(f"Error stopping health server: {e}")
+
+
+class EventHandlers:
+    """Handles Slack events like mentions, messages, and home tab."""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.ai_service = AIService(self.bot.settings)
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        """Register event handlers."""
+        self.bot.app.event("app_mention")(self.handle_mention)
+        self.bot.app.message()(self.handle_message)
+        self.bot.app.event("app_home_opened")(self.handle_home_opened)
+        
+        # Settings UI handlers
+        self.bot.app.action("settings_button")(self.handle_settings_button)
+        self.bot.app.view("settings_modal")(self.handle_settings_submission)
+        self.bot.app.action("reply_in_thread_setting")(self.handle_checkbox_action)
+        self.bot.app.action("mention_only_setting")(self.handle_checkbox_action)
+        self.bot.app.action("auto_respond_setting")(self.handle_checkbox_action)
     
     async def handle_mention(self, event, say):
         """Handle mentions of the bot in channels."""
-        await self._send_hello_world(event, say)
+        await self._send_ai_response(event, say)
     
     async def handle_message(self, message, say):
         """Handle direct messages to the bot."""
-        # Only process direct messages
-        if (message.get("channel_type") == "im" and 
-            not message.get("subtype")):
-            
+        if message.get("channel_type") == "im" and not message.get("subtype"):
             text = message.get("text", "").lower().strip()
             
-            # Check if user is asking for settings
-            if any(keyword in text for keyword in ["settings", "config", "configure", "setup", "preferences"]):
+            if any(keyword in text for keyword in ["settings", "config", "setup"]):
                 await self._send_settings_info(message, say)
-                return
-            
-            # Check if user is asking for help
-            if any(keyword in text for keyword in ["help", "commands", "what can you do", "capabilities"]):
+            elif any(keyword in text for keyword in ["help", "commands"]):
                 await self._send_help_info(message, say)
-                return
-            
-            # Regular Hello World response
-            if self.settings.get("auto_respond"):
-                await self._send_hello_world(message, say)
+            elif self.bot.settings.get("auto_respond"):
+                await self._send_ai_response(message, say)
     
-    async def _send_hello_world(self, event, say):
-        """Send Hello World response based on settings."""
-        user_id = event.get("user")
-        channel_type = event.get("channel_type", "unknown")
-        text = event.get("text", "")
-        
-        # Skip messages from the bot itself
-        if user_id == self.bot_id:
-            return
-        
-        # Reload settings to ensure we have the latest values
-        self.settings.settings = self.settings.load_settings()
-        
-        # Check settings
-        mention_only = self.settings.get("mention_only")
-        auto_respond = self.settings.get("auto_respond")
-        reply_in_thread = self.settings.get("reply_in_thread")
-        
-        # Check if we should only respond to mentions
-        if mention_only:
-            # For channels, only respond if mentioned
-            if channel_type != "im":
-                if not (hasattr(self, "bot_id") and self.bot_id and f"<@{self.bot_id}>" in text):
-                    return
-        
-        # Check if auto_respond is enabled
-        if not auto_respond:
-            return
-        
-        # Determine thread_ts based on settings
-        thread_ts = None
-        if reply_in_thread:
-            thread_ts = event.get("thread_ts", event.get("ts"))
-        
-        try:
-            await say(text="*Hello World!* :wave:", thread_ts=thread_ts)
-        except Exception as e:
-            logging.error(f"Error sending Hello World: {e}")
-    
-    async def _send_settings_info(self, message, say):
-        """Send settings information and options via DM."""
-        # Reload settings to ensure we show the latest values
-        self.settings.settings = self.settings.load_settings()
-        settings = self.settings.settings
-
-        settings_text = (
-            "*⚙️ Bot Settings*\n\n"
-            "*Current Configuration:*\n"
-            f"* Reply in Thread: {'*✅ Enabled*' if settings['reply_in_thread'] else '*❌ Disabled*'}\n"
-            f"* Mention Only: {'*✅ Enabled*' if settings['mention_only'] else '*❌ Disabled*'}\n"
-            f"* Auto Respond: {'*✅ Enabled*' if settings['auto_respond'] else '*❌ Disabled*'}\n\n"
-            "*To Change Settings:*\n"
-            "1. *App Home Tab*: Click on my name in the sidebar → Home tab → Configure Settings\n"
-            "2. *Slash Command*: Type `/bot-settings` in any channel\n"
-            "3. *Direct Message*: Just ask me about `settings` or `config`\n\n"
-            "*What each setting does:*\n"
-            "> *Reply in Thread*: Controls whether I reply in threads or send new messages\n"
-            "> *Mention Only*: If enabled, I only respond when @mentioned\n"
-            "> *Auto Respond*: If disabled, I won't respond to any messages\n\n"
-            "Type `help` for more information! :wave:"
-        )
-
-        try:
-            await say(text=settings_text)
-        except Exception as e:
-            logging.error(f"Error sending settings info: {e}")
-
-    async def _send_help_info(self, message, say):
-        """Send help information via DM."""
-        help_text = (
-            "*🤖 Phase 1 Bot Help*\n\n"
-            "*What I can do:*\n"
-            "* Respond with `Hello World!` when mentioned\n"
-            "* Work in channels and direct messages\n"
-            "* Configurable behavior through settings\n\n"
-            "*Available Commands:*\n"
-            "* `/bot-settings` - Configure bot behavior\n"
-            "* `/bot-help` - Show this help message\n"
-            "* Just mention me with `@bot_name` in any channel\n"
-            "* Send me a DM with `settings` or `help`\n\n"
-            "*Settings Options:*\n"
-            "> *Reply in Thread*: Toggle thread vs new message replies\n"
-            "> *Mention Only*: Control when I respond (mention vs any message)\n"
-            "> *Auto Respond*: Enable/disable automatic responses\n\n"
-            "*Getting Started:*\n"
-            "1. Invite me to a channel: `/invite @bot_name`\n"
-            "2. Mention me: `@bot_name hello`\n"
-            "3. Configure settings: `/bot-settings`\n\n"
-            "> Need more help? Just ask! :rocket:"
-        )
-
-        try:
-            await say(text=help_text)
-        except Exception as e:
-            logging.error(f"Error sending help info: {e}")
-
     async def handle_home_opened(self, event, client):
         """Handle when a user opens the App Home tab."""
         user_id = event["user"]
-        
-        # Get current settings for display
-        settings = self.settings.settings
+        settings = self.bot.settings.settings
         
         blocks = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": "🤖 Phase 1 Bot - Hello World!"}
+                "text": {"type": "plain_text", "text": "🤖 AI Slack Bot"}
             },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Welcome! This bot responds with `Hello World!` when mentioned. Configure the settings below to customize behavior:"
+                    "text": "Welcome! This bot provides AI-powered responses when mentioned."
                 }
             },
             {
@@ -332,14 +335,9 @@ class Phase1SlackBot:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "*Current Settings:*"
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"* Reply in Thread: {'*✅ Yes*' if settings['reply_in_thread'] else '*❌ No*'}\n* Mention Only: {'*✅ Yes*' if settings['mention_only'] else '*❌ No*'}\n* Auto Respond: {'*✅ Yes*' if settings['auto_respond'] else '*❌ No*'}"
+                    "text": f"*Settings:* Reply in Thread: {'✅' if settings['reply_in_thread'] else '❌'} | "
+                           f"Mention Only: {'✅' if settings['mention_only'] else '❌'} | "
+                           f"Auto Respond: {'✅' if settings['auto_respond'] else '❌'}"
                 }
             },
             {
@@ -352,447 +350,199 @@ class Phase1SlackBot:
                         "style": "primary"
                     }
                 ]
-            },
-            {
-                "type": "divider"
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*Available Commands:*\n* `/bot-settings` - Open settings\n* `/bot-help` - Show help\n* Mention me in any channel\n* Send me a direct message"
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*Quick Start:*\n1. Invite me to a channel: `/invite @bot_name`\n2. Mention me: `@bot_name hello`\n3. I'll respond with `Hello World!` :wave:"
-                }
             }
         ]
         
         try:
-            await client.views_publish(
-                user_id=user_id,
-                view={"type": "home", "blocks": blocks}
-            )
+            await client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
         except Exception as e:
             logging.error(f"Error publishing home view: {e}")
     
-    async def handle_settings_command(self, ack, body, client):
-        """Handle /bot-settings slash command."""
-        await ack()
-        
-        user_id = body.get('user_id')
-        channel_id = body.get('channel_id')
-        trigger_id = body.get('trigger_id')
-        
-        if not trigger_id:
-            await client.chat_postEphemeral(
-                channel=channel_id, user=user_id,
-                text=":x: *Command error*: Missing session data. Please try the App Home tab for settings."
-            )
-            return
-        
-        try:
-            await self._open_settings_modal_fast(trigger_id, client, user_id)
-        except SlackApiError as modal_error:
-            error_msg = str(modal_error).lower()
-            logging.error(f"Modal error: {modal_error}")
-            
-            if "expired_trigger_id" in error_msg or "invalid_trigger" in error_msg:
-                text = ":warning: *Session expired*. Please try `/bot-settings` again or use the App Home tab."
-            elif "missing_scope" in error_msg or "not_allowed" in error_msg:
-                text = ":x: *Permission error*. Please contact admin to verify bot permissions."
-            elif "invalid_arguments" in error_msg:
-                text = ":x: *Settings modal unavailable*. Try the App Home tab or mention me for help."
-            else:
-                text = (
-                    "*⚙️ Current Bot Settings:*\n"
-                    f"* Reply in Thread: {'*✅*' if self.settings.get('reply_in_thread') else '*❌*'}\n"
-                    f"* Mention Only: {'*✅*' if self.settings.get('mention_only') else '*❌*'}\n"
-                    f"* Auto Respond: {'*✅*' if self.settings.get('auto_respond') else '*❌*'}\n\n"
-                    "Use the App Home tab to change settings."
-                )
-            await client.chat_postEphemeral(channel=channel_id, user=user_id, text=text)
-        except Exception as e:
-            logging.error(f"Unexpected error in /bot-settings command: {e}")
-            await client.chat_postEphemeral(
-                channel=channel_id, user=user_id,
-                text=":x: *Settings temporarily unavailable*. Try mentioning me or check the App Home tab."
-            )
-    
-    async def handle_help_command(self, ack, body, client):
-        """Handle /bot-help slash command."""
-        await ack()
-        
-        try:
-            help_text = (
-                "*🤖 Phase 1 Bot Help*\n\n"
-                "*What I can do:*\n"
-                "* Respond with `Hello World!` when mentioned\n"
-                "* Work in channels and direct messages\n"
-                "* Configurable behavior through settings\n\n"
-                "*Available Commands:*\n"
-                "* `/bot-settings` - Configure bot behavior\n"
-                "* `/bot-help` - Show this help message\n"
-                "* Just mention me with `@bot_name` in any channel\n"
-                "* Send me a DM with `settings` or `help`\n\n"
-                "*Settings Options:*\n"
-                "> *Reply in Thread*: Toggle thread vs new message replies\n"
-                "> *Mention Only*: Control when I respond (mention vs any message)\n"
-                "> *Auto Respond*: Enable/disable automatic responses\n\n"
-                "*Getting Started:*\n"
-                "1. Invite me to a channel: `/invite @bot_name`\n"
-                "2. Mention me: `@bot_name hello`\n"
-                "3. Configure settings: `/bot-settings`\n\n"
-                "> Need more help? Just ask! :rocket:"
-            )
-            
-            await client.chat_postEphemeral(
-                channel=body["channel_id"],
-                user=body["user_id"],
-                text=help_text
-            )
-        except Exception as e:
-            logging.error(f"Error handling help command: {e}")
-            try:
-                await client.chat_postEphemeral(
-                    channel=body["channel_id"],
-                    user=body["user_id"],
-                    text=":x: Error showing help. You can mention me or send a DM for assistance!"
-                )
-            except Exception:
-                pass
-    
-    async def handle_debug_command(self, ack, body, client):
-        """Handle /bot-debug slash command for troubleshooting."""
-        await ack()
-        
-        try:
-            logging.info(f"Received /bot-debug command from user {body.get('user_id')}")
-            
-            # Reload settings to show current values
-            self.settings.settings = self.settings.load_settings()
-            
-            # Get debug information
-            trigger_id = body.get("trigger_id", "None")
-            
-            debug_text = (
-                "*🔍 Bot Debug Information*\n\n"
-                "*System Status:*\n"
-                f"* Bot ID: `{self.bot_id or 'Unknown'}`\n"
-                f"* Trigger ID Present: {'*Yes*' if trigger_id != 'None' else '*No*'}\n"
-                f"* Settings File: {'*Found*' if os.path.exists('bot_settings.json') else '*Missing*'}\n\n"
-                "*Current Settings (reloaded from file):*\n"
-                f"* Reply in Thread: `{self.settings.get('reply_in_thread')}`\n"
-                f"* Mention Only: `{self.settings.get('mention_only')}`\n"
-                f"* Auto Respond: `{self.settings.get('auto_respond')}`\n\n"
-                "*Slash Command Test:*\n"
-                "> If you can see this message, slash commands are working!\n\n"
-                "*Troubleshooting:*\n"
-                "> If `/bot-settings` fails: Use App Home tab\n"
-                "> If modal doesn't open: Try command again quickly\n"
-                "> If persistent issues: Check Slack app configuration\n\n"
-                "*Next Steps:*\n"
-                "1. Try `/bot-settings` now\n"
-                "2. If it fails, use the App Home tab\n"
-                "3. Check logs for any error messages"
-            )
-            
-            await client.chat_postEphemeral(
-                channel=body["channel_id"],
-                user=body["user_id"],
-                text=debug_text
-            )
-            logging.info(f"Sent debug info to user {body['user_id']}")
-        except Exception as e:
-            logging.error(f"Error handling debug command: {e}")
-            try:
-                await client.chat_postEphemeral(
-                    channel=body["channel_id"],
-                    user=body["user_id"],
-                    text=f":x: Debug command error: {str(e)}"
-                )
-            except Exception:
-                pass
-    
     async def handle_settings_button(self, ack, body, client):
-        """Handle the settings button click to open modal."""
+        """Handle settings button click."""
         await ack()
-        
         try:
-            # Use the helper method to open settings modal
-            await self._open_settings_modal(body["trigger_id"], client)
+            await self.bot.commands._open_settings_modal(body["trigger_id"], client, body["user"]["id"])
         except Exception as e:
             logging.error(f"Error opening settings modal: {e}")
-    
-    async def _open_settings_modal_fast(self, trigger_id, client, user_id):
-        """Optimized helper to open settings modal quickly to avoid trigger_id expiration."""
-        try:
-            # Reload settings from file to ensure we have the latest values
-            self.settings.settings = self.settings.load_settings()
-            settings = self.settings.settings
-            logging.info(f"Opening modal with current settings: {settings}")
-            
-            # Define option objects once and reuse them for initial_options
-            thread_option = {"text": {"type": "plain_text", "text": "Enable thread replies"}, "value": "reply_in_thread"}
-            mention_option = {"text": {"type": "plain_text", "text": "Mention only mode"}, "value": "mention_only"}
-            auto_respond_option = {"text": {"type": "plain_text", "text": "Enable auto response"}, "value": "auto_respond"}
-            
-            # Build blocks with properly matching initial_options
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "*Configure your bot preferences:*"}
-                }
-            ]
-            
-            # Reply in Thread setting
-            thread_block = {
-                "type": "section",
-                "block_id": "reply_in_thread_block",
-                "text": {"type": "mrkdwn", "text": "*Reply in Thread*\nReply to messages in threads instead of new messages"},
-                "accessory": {
-                    "type": "checkboxes",
-                    "action_id": "reply_in_thread_setting",
-                    "options": [thread_option]
-                }
-            }
-            if settings.get("reply_in_thread"):
-                thread_block["accessory"]["initial_options"] = [thread_option]
-            blocks.append(thread_block)
-            
-            # Mention Only setting
-            mention_block = {
-                "type": "section", 
-                "block_id": "mention_only_block",
-                "text": {"type": "mrkdwn", "text": "*Mention Only*\nOnly respond when directly mentioned"},
-                "accessory": {
-                    "type": "checkboxes",
-                    "action_id": "mention_only_setting",
-                    "options": [mention_option]
-                }
-            }
-            if settings.get("mention_only"):
-                mention_block["accessory"]["initial_options"] = [mention_option]
-            blocks.append(mention_block)
-            
-            # Auto Respond setting
-            auto_respond_block = {
-                "type": "section",
-                "block_id": "auto_respond_block",
-                "text": {"type": "mrkdwn", "text": "*Auto Respond*\nAutomatically respond to messages"},
-                "accessory": {
-                    "type": "checkboxes",
-                    "action_id": "auto_respond_setting", 
-                    "options": [auto_respond_option]
-                }
-            }
-            if settings.get("auto_respond"):
-                auto_respond_block["accessory"]["initial_options"] = [auto_respond_option]
-            blocks.append(auto_respond_block)
-            
-            # Create a minimal, fast-loading modal
-            modal_view = {
-                "type": "modal",
-                "callback_id": "settings_modal",
-                "title": {"type": "plain_text", "text": "Bot Settings"},
-                "submit": {"type": "plain_text", "text": "Save"},
-                "close": {"type": "plain_text", "text": "Cancel"},
-                "blocks": blocks
-            }
-            
-            # Open modal immediately - this must complete within 3 seconds of slash command
-            await client.views_open(trigger_id=trigger_id, view=modal_view)
-            logging.info(f"Modal opened successfully for user {user_id}")
-            
-        except Exception as e:
-            logging.error(f"Error opening settings modal: {e}")
-            # Re-raise to allow calling function to handle fallback
-            raise
-
-    async def _open_settings_modal(self, trigger_id, client):
-        """Legacy modal helper - now calls optimized version."""
-        await self._open_settings_modal_fast(trigger_id, client, "legacy_call")
-    
-    async def _send_settings_fallback(self, body, client):
-        """Send settings information as fallback when modal fails."""
-        settings = self.settings.settings
-        
-        settings_text = (
-            "*⚙️ Bot Settings* (Modal unavailable, showing current settings)\n\n"
-            "*Current Configuration:*\n"
-            f"* Reply in Thread: {'*✅ Enabled*' if settings['reply_in_thread'] else '*❌ Disabled*'}\n"
-            f"* Mention Only: {'*✅ Enabled*' if settings['mention_only'] else '*❌ Disabled*'}\n"
-            f"* Auto Respond: {'*✅ Enabled*' if settings['auto_respond'] else '*❌ Disabled*'}\n\n"
-            "*To Change Settings:*\n"
-            "1. *App Home Tab*: Click on my name in the sidebar → Home tab → ⚙️ Configure Settings\n"
-            "2. *Direct Message*: Send me `settings` via DM for interactive setup\n"
-            "3. *Try Again*: Wait a moment and try `/bot-settings` again\n\n"
-            "> *Tip*: The App Home tab is the most reliable way to access settings!"
-        )
-        
-        try:
-            await client.chat_postEphemeral(
-                channel=body["channel_id"],
-                user=body["user_id"],
-                text=settings_text
-            )
-        except Exception as e:
-            logging.error(f"Error sending settings fallback: {e}")
     
     async def handle_checkbox_action(self, ack, body):
-        """Handle checkbox interactions in the settings modal"""
+        """Handle checkbox interactions."""
         await ack()
-        # This just acknowledges the checkbox click - no need to do anything else
-        # The actual saving happens when the modal is submitted
-
+    
     async def handle_settings_submission(self, ack, body, client):
         """Handle settings modal submission."""
         await ack()
         
         try:
-            # Extract values from the modal submission
             values = body["view"]["state"]["values"]
             
-            # Debug: log the structure we received
-            logging.info(f"Modal submission values structure: {values}")
-            
-            # Update settings based on checkbox selections
-            # The structure is values[block_id][action_id]["selected_options"]
             reply_in_thread = len(values.get("reply_in_thread_block", {}).get("reply_in_thread_setting", {}).get("selected_options", [])) > 0
             mention_only = len(values.get("mention_only_block", {}).get("mention_only_setting", {}).get("selected_options", [])) > 0
             auto_respond = len(values.get("auto_respond_block", {}).get("auto_respond_setting", {}).get("selected_options", [])) > 0
             
-            # Save settings (this will automatically reload them from file)
-            self.settings.set("reply_in_thread", reply_in_thread)
-            self.settings.set("mention_only", mention_only)
-            self.settings.set("auto_respond", auto_respond)
+            self.bot.settings.set("reply_in_thread", reply_in_thread)
+            self.bot.settings.set("mention_only", mention_only)
+            self.bot.settings.set("auto_respond", auto_respond)
             
-            # Verify settings were saved by reading them back
-            current_settings = self.settings.load_settings()
-            
-            # Send detailed confirmation message
             user_id = body["user"]["id"]
-            confirmation_text = (
-                "*✅ Settings updated successfully!*\n\n"
-                "*New Configuration:*\n"
-                f"* Reply in Thread: {'*✅ Enabled*' if current_settings['reply_in_thread'] else '*❌ Disabled*'}\n"
-                f"* Mention Only: {'*✅ Enabled*' if current_settings['mention_only'] else '*❌ Disabled*'}\n"
-                f"* Auto Respond: {'*✅ Enabled*' if current_settings['auto_respond'] else '*❌ Disabled*'}\n\n"
-                "> *Changes take effect immediately!* Try mentioning me to test the new settings."
-            )
-            
             await client.chat_postMessage(
                 channel=user_id,
-                text=confirmation_text
+                text="✅ Settings updated successfully! Changes take effect immediately."
             )
             
-            logging.info(f"Settings updated by user {user_id}: reply_in_thread={reply_in_thread}, mention_only={mention_only}, auto_respond={auto_respond}")
-            logging.info(f"Verified saved settings: {current_settings}")
         except Exception as e:
             logging.error(f"Error handling settings submission: {e}")
-            try:
-                user_id = body["user"]["id"]
-                await client.chat_postMessage(
-                    channel=user_id,
-                    text=":x: Error updating settings. Please try again or use the App Home tab."
-                )
-            except:
-                pass
     
-    def _setup_health_server(self):
-        """Setup aiohttp health check server."""
-        self.health_app = web.Application()
-        self.health_app.router.add_get('/health', self.health_check)
-        self.health_app.router.add_get('/', self.health_check)  # Root endpoint too
-    
-    async def health_check(self, request):
-        """Health check endpoint to keep the bot alive."""
-        import time
+    async def _send_ai_response(self, event, say):
+        """Send AI-powered response based on settings."""
+        user_id = event.get("user")
         
-        # Get current settings
-        settings = self.settings.load_settings()
+        if user_id == self.bot.bot_id:
+            return
         
-        # Create health status
-        health_data = {
-            "status": "healthy",
-            "timestamp": time.time(),
-            "bot_id": self.bot_id,
-            "settings": settings,
-            "uptime": "running"
-        }
+        settings = self.bot.settings.load_settings()
+        channel_type = event.get("channel_type", "unknown")
+        text = event.get("text", "")
         
-        return web.json_response(health_data)
-    
-    async def start_health_server(self):
-        """Start the health check server, binding to 0.0.0.0 and using PORT env var."""
-        port = int(os.getenv('PORT', 8080))
-        host = '0.0.0.0'
+        # Clean up the message text (remove bot mention for processing)
+        if self.bot.bot_id and f"<@{self.bot.bot_id}>" in text:
+            user_message = text.replace(f"<@{self.bot.bot_id}>", "").strip()
+        else:
+            user_message = text.strip()
+        
+        # Skip empty messages
+        if not user_message:
+            user_message = "Hello!"
+        
+        if settings.get("mention_only") and channel_type != "im":
+            if not (self.bot.bot_id and f"<@{self.bot.bot_id}>" in text):
+                return
+        
+        if not settings.get("auto_respond"):
+            return
+        
+        thread_ts = None
+        if settings.get("reply_in_thread"):
+            thread_ts = event.get("thread_ts", event.get("ts"))
+        
         try:
-            from aiohttp.web_runner import AppRunner, TCPSite
-            
-            self.health_runner = AppRunner(self.health_app)
-            await self.health_runner.setup()
-            
-            site = TCPSite(self.health_runner, host, port)
-            await site.start()
-            
-            logging.info(f"Health check server started on http://{host}:{port}/health")
-            return True
+            # Get AI response
+            ai_response = await self.ai_service.get_response(user_message, user_id)
+            await say(text=ai_response, thread_ts=thread_ts)
         except Exception as e:
-            logging.error(f"Failed to start health server: {e}")
-            return False
+            logging.error(f"Error sending AI response: {e}")
+            # Fallback to simple response
+            await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts)
+    
+    async def _send_settings_info(self, message, say):
+        """Send settings info via DM."""
+        settings = self.bot.settings.load_settings()
+        
+        text = (
+            "*⚙️ Bot Settings*\n\n"
+            f"• Reply in Thread: {'✅' if settings['reply_in_thread'] else '❌'}\n"
+            f"• Mention Only: {'✅' if settings['mention_only'] else '❌'}\n"
+            f"• Auto Respond: {'✅' if settings['auto_respond'] else '❌'}\n\n"
+            "Use `/bot-settings` or the App Home tab to change settings."
+        )
+        
+        try:
+            await say(text=text)
+        except Exception as e:
+            logging.error(f"Error sending settings info: {e}")
+    
+    async def _send_help_info(self, message, say):
+        """Send help info via DM."""
+        ai_status = "✅ Available" if self.ai_service.is_available() else "❌ Unavailable"
+        
+        text = (
+            "*🤖 AI Slack Bot Help*\n\n"
+            "*What I can do:*\n"
+            "• Provide AI-powered responses to your questions\n"
+            "• Work in channels and direct messages\n"
+            "• Configurable behavior through settings\n\n"
+            "*Commands:*\n"
+            "• `/bot-settings` - Configure settings\n"
+            "• `/bot-help` - Show help\n"
+            "• `/bot-debug` - Debug info\n"
+            "• `/switch-llm` - Switch AI model\n\n"
+            "*Usage:*\n"
+            "• Mention me in channels: `@bot_name your question`\n"
+            "• Send me direct messages\n\n"
+            f"*AI Service:* {ai_status}"
+        )
+        
+        try:
+            await say(text=text)
+        except Exception as e:
+            logging.error(f"Error sending help info: {e}")
 
-    async def start(self) -> None:
-        """Start the Slack bot and health server."""
+
+class SlackBot:
+    """Main Slack bot class with modular architecture."""
+    
+    def __init__(self, slack_bot_token: str, slack_app_token: str):
+        self.app = AsyncApp(token=slack_bot_token)
+        self.socket_mode_handler = AsyncSocketModeHandler(self.app, slack_app_token)
+        self.client = AsyncWebClient(token=slack_bot_token)
+        self.settings = BotSettings()
+        self.bot_id = None
+        self.ai_service = AIService(self.settings)  # Attach ai_service for slash_commands
+        
+        # Initialize modules
+        from src.slash_commands import SlashCommands
+        self.commands = SlashCommands(self)
+        self.events = EventHandlers(self)
+        self.health = HealthServer(self)
+    
+    async def initialize_bot_info(self):
+        """Get bot ID and info from Slack."""
+        try:
+            auth_info = await self.client.auth_test()
+            self.bot_id = auth_info["user_id"]
+            bot_name = auth_info.get("user", "Unknown")
+            logging.info(f"Bot initialized: {bot_name} (ID: {self.bot_id})")
+        except Exception as e:
+            logging.error(f"Failed to get bot info: {e}")
+            self.bot_id = None
+    
+    async def start(self):
+        """Start the bot and health server."""
         await self.initialize_bot_info()
         logging.info("Starting Slack bot...")
         
-        # Start health check server
-        await self.start_health_server()
-        
-        # Start Socket Mode handler in background
+        await self.health.start()
         asyncio.create_task(self.socket_mode_handler.start_async())
     
-    async def cleanup(self) -> None:
+    async def cleanup(self):
         """Clean up resources."""
         try:
             if hasattr(self, "socket_mode_handler"):
                 await self.socket_mode_handler.close_async()
         except Exception as e:
-            logging.error(f"Error closing socket mode handler: {e}")
+            logging.error(f"Error closing socket handler: {e}")
         
-        try:
-            if self.health_runner:
-                await self.health_runner.cleanup()
-                logging.info("Health server stopped")
-        except Exception as e:
-            logging.error(f"Error stopping health server: {e}")
+        await self.health.cleanup()
 
 
 def main():
-    """Main function to setup and run the bot."""
-    # Setup environment
+    """Main entry point."""
     env_setup = EnvironmentSetup()
     
-    # Validate environment
     slack_bot_token, slack_app_token = env_setup.validate_environment()
     if not slack_bot_token or not slack_app_token:
-        logging.error("Environment validation failed. Please set SLACK_BOT_TOKEN and SLACK_APP_TOKEN.")
+        logging.error("Environment validation failed. Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN.")
         return
     
-    logging.info("Starting Phase 1 Slack Bot...")
+    logging.info("Starting AI Slack Bot...")
     
     async def run_bot():
-        """Run the bot with proper error handling."""
-        bot = Phase1SlackBot(slack_bot_token, slack_app_token)
+        """Run the bot with error handling."""
+        bot = SlackBot(slack_bot_token, slack_app_token)
         
         try:
             await bot.start()
-            # Keep the main task alive until interrupted
             while True:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
@@ -802,7 +552,6 @@ def main():
         finally:
             await bot.cleanup()
     
-    # Run the bot
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:

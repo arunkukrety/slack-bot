@@ -1,5 +1,6 @@
 {
   "reply_in_thread": true,
   "mention_only": true,
-  "auto_respond": true
+  "auto_respond": true,
+  "llm_model": "meta-llama/llama-3.3-70b-instruct:free"
 }

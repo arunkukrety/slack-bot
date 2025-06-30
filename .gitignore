@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 
 
+/src/config
+/src/handlers
+/src/utils
+/src/services
