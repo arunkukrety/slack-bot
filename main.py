@@ -366,7 +366,7 @@ class EventHandlers:
             await say(text=ai_response, thread_ts=thread_ts)
         except Exception as e:
             logging.error(f"[Event] Error sending AI response: {e}")
-            await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts)
+            await say(text="Hello World! 🤖 ({e})", thread_ts=thread_ts)
     
     async def _send_settings_info(self, message, say):
         """Send settings info via DM."""
