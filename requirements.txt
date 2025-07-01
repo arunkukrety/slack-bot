@@ -3,3 +3,4 @@ aiohttp>=3.8.1
 openai>=1.0.0
 supabase
 certifi>=2024.2.2
+groq>=0.4.1

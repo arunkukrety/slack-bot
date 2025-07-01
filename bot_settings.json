@@ -1,6 +1,5 @@
 {
   "reply_in_thread": true,
-  "mention_only": true,
-  "auto_respond": false,
-  "llm_model": "mistralai/mistral-small-3.2-24b-instruct:free"
+  "mention_only": false,
+  "llm_model": "meta-llama/llama-3.3-70b-instruct:free"
 }

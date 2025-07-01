@@ -69,8 +69,48 @@ def slack_ts_to_iso(ts: str) -> str:
         logging.error(f"[Supabase] Failed to convert ts '{ts}' to ISO: {e}")
         return None
 
-async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str, msg_type: str = "incoming"):
-    """Log a Slack message to Supabase, including user name."""
+async def get_message_context() -> str:
+    """Fetch recent messages from Supabase for LLM context."""
+    supabase = get_supabase_client()
+    if not supabase:
+        logging.error("[Supabase] Supabase client not available. Cannot fetch message context.")
+        return ""
+    
+    try:
+        # Fetch messages ordered by timestamp (most recent first), limit to avoid token overflow
+        response = supabase.table("messages").select("content, user_name, timestamp").order("timestamp", desc=True).limit(50).execute()
+        
+        if hasattr(response, "data") and response.data:
+            formatted_messages = format_messages_for_context(response.data)
+            logging.info(f"[Supabase] Retrieved {len(response.data)} messages for context.")
+            return formatted_messages
+        else:
+            logging.warning("[Supabase] No messages found in database.")
+            return ""
+            
+    except Exception as e:
+        logging.error(f"[Supabase] Failed to fetch message context: {e}")
+        return ""
+
+def format_messages_for_context(messages: list) -> str:
+    """Format messages for inclusion in LLM system prompt."""
+    if not messages:
+        return ""
+    
+    formatted_lines = []
+    for msg in reversed(messages):  # Reverse to show chronological order
+        content = msg.get("content", "").strip()
+        user_name = msg.get("user_name", "unknown")
+        timestamp = msg.get("timestamp", "")
+        
+        if content:  # Only include messages with actual content
+            # Format: [timestamp] username: message
+            formatted_lines.append(f"[{timestamp}] {user_name}: {content}")
+    
+    return "\n".join(formatted_lines)
+
+async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str, msg_type: str = "incoming", important: str = None, repliable: str = None):
+    """Log a Slack message to Supabase, including user name and classification."""
     logging.debug(f"Raw message: {msg}")
     supabase = get_supabase_client()
     if not supabase:
@@ -85,7 +125,7 @@ async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str
     user_id = msg.get("user") or "unknown"
     user_name = await get_user_name(client, bot_id if msg_type == "outgoing" else user_id)
 
-    logging.info(f"[Supabase] Logging message: ts={ts}, type={msg_type}, channel={msg.get('channel')}, user={user_name}")
+    logging.info(f"[Supabase] Logging message: ts={ts}, type={msg_type}, channel={msg.get('channel')}, user={user_name}, important={important}, repliable={repliable}")
     iso_timestamp = slack_ts_to_iso(ts)
     if not iso_timestamp:
         logging.error(f"[Supabase] Failed to convert timestamp for message {ts}. Skipping.")
@@ -99,7 +139,9 @@ async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str
         "channel_id": msg.get("channel") or "unknown",
         "content": msg.get("text", ""),
         "timestamp": iso_timestamp,
-        "message_type": msg_type
+        "message_type": msg_type,
+        "important": important,
+        "repliable": repliable
     }
     try:
         resp = supabase.table("messages").upsert(data, on_conflict="id").execute()

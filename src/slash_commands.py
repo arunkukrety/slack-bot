@@ -19,6 +19,7 @@ class SlashCommands:
         self.bot.app.command("/bot-help")(self.handle_help)
         self.bot.app.command("/bot-debug")(self.handle_debug)
         self.bot.app.command("/switch-llm")(self.handle_switch_llm)
+        self.bot.app.command("/clear-tracked-threads")(self.handle_clear_tracked_threads)
         
         # Handle LLM switch submission
         self.bot.app.view("llm_switch_modal")(self.handle_llm_switch_submission)
@@ -63,8 +64,14 @@ class SlashCommands:
             "*Available Commands:*\n"
             "• `/bot-settings` - Configure bot behavior\n"
             "• `/switch-llm` - Choose your AI model\n"
+            "• `/clear-tracked-threads` - Clear mention-only thread tracking\n"
             "• `/bot-help` - Show this help message\n"
             "• `/bot-debug` - Show debug information\n\n"
+            "*Mention Only Mode:*\n"
+            "• When ON: Bot only replies when mentioned, then continues in that thread\n"
+            "• When OFF: Bot replies to all messages in channels\n"
+            "• Bot always responds to direct messages\n"
+            "• Use `/clear-tracked-threads` to reset thread tracking\n\n"
             "*Getting Started:*\n"
             "1. Invite me to a channel: `/invite @bot_name`\n"
             "2. Ask me anything: `@bot_name what's the weather like?`\n"
@@ -93,8 +100,18 @@ class SlashCommands:
                 from main import AIService
                 ai_service = AIService(self.bot.settings)
             ai_status = "✅ Available" if ai_service.is_available() else "❌ Missing OPEN_ROUTER_KEY"
+            
+            # Check Groq service status
+            groq_service = getattr(self.bot.event_handlers, 'groq_service', None)
+            groq_status = "✅ Available" if groq_service and groq_service.is_available() else "❌ Missing GROQ_API_KEY"
+            
             current_model = self.bot.settings.get("llm_model", "meta-llama/llama-3.3-70b-instruct:free")
             model_display = get_model_display_name(current_model)
+            
+            # Get thread tracking info
+            tracked_threads_count = 0
+            if hasattr(self.bot, 'event_handlers') and hasattr(self.bot.event_handlers, 'tracked_threads'):
+                tracked_threads_count = len(self.bot.event_handlers.tracked_threads)
             
             debug_text = (
                 "*🔍 Bot Debug Information*\n\n"
@@ -103,11 +120,17 @@ class SlashCommands:
                 f"• Trigger ID: {'Present' if trigger_id != 'None' else 'Missing'}\n"
                 f"• Settings File: {'Found' if os.path.exists('bot_settings.json') else 'Missing'}\n"
                 f"• AI Service: {ai_status}\n"
+                f"• Groq Classification: {groq_status}\n"
                 f"• Current Model: {model_display}\n\n"
                 "*Current Settings:*\n"
                 f"• Reply in Thread: `{self.bot.settings.get('reply_in_thread')}`\n"
-                f"• Mention Only: `{self.bot.settings.get('mention_only')}`\n"
-                f"• Auto Respond: `{self.bot.settings.get('auto_respond')}`\n\n"
+                f"• Mention Only: `{self.bot.settings.get('mention_only')}`\n\n"
+                "*Thread Tracking:*\n"
+                f"• Tracked Threads: `{tracked_threads_count}`\n"
+                f"• Use `/clear-tracked-threads` to reset\n\n"
+                "*Classification:*\n"
+                f"• Messages are classified as important/repliable\n"
+                f"• Bot only replies if both are YES\n\n"
                 "*Status:* Slash commands are working!"
             )
             
@@ -125,7 +148,6 @@ class SlashCommands:
         
         thread_option = {"text": {"type": "plain_text", "text": "Enable thread replies"}, "value": "reply_in_thread"}
         mention_option = {"text": {"type": "plain_text", "text": "Mention only mode"}, "value": "mention_only"}
-        auto_respond_option = {"text": {"type": "plain_text", "text": "Enable auto response"}, "value": "auto_respond"}
         
         blocks = [
             {
@@ -137,8 +159,7 @@ class SlashCommands:
         # Build setting blocks
         for setting_key, option, label, description in [
             ("reply_in_thread", thread_option, "Reply in Thread", "Reply to messages in threads instead of new messages"),
-            ("mention_only", mention_option, "Mention Only", "Only respond when directly mentioned"),
-            ("auto_respond", auto_respond_option, "Auto Respond", "Automatically respond to messages")
+            ("mention_only", mention_option, "Mention Only", "Only respond when directly mentioned")
         ]:
             block = {
                 "type": "section",
@@ -185,8 +206,7 @@ class SlashCommands:
         return (
             "*⚙️ Current Bot Settings:*\n"
             f"• Reply in Thread: {'✅' if settings['reply_in_thread'] else '❌'}\n"
-            f"• Mention Only: {'✅' if settings['mention_only'] else '❌'}\n"
-            f"• Auto Respond: {'✅' if settings['auto_respond'] else '❌'}\n\n"
+            f"• Mention Only: {'✅' if settings['mention_only'] else '❌'}\n\n"
             "Use the App Home tab to change settings."
         )
 
@@ -317,11 +337,9 @@ class SlashCommands:
             values = body["view"]["state"]["values"]
             reply_in_thread = len(values.get("reply_in_thread_block", {}).get("reply_in_thread_setting", {}).get("selected_options", [])) > 0
             mention_only = len(values.get("mention_only_block", {}).get("mention_only_setting", {}).get("selected_options", [])) > 0
-            auto_respond = len(values.get("auto_respond_block", {}).get("auto_respond_setting", {}).get("selected_options", [])) > 0
 
             self.bot.settings.set("reply_in_thread", reply_in_thread)
             self.bot.settings.set("mention_only", mention_only)
-            self.bot.settings.set("auto_respond", auto_respond)
 
             user_id = body["user"]["id"]
             await client.chat_postMessage(
@@ -338,3 +356,36 @@ class SlashCommands:
                 )
             except:
                 pass
+    
+    async def handle_clear_tracked_threads(self, ack, body, client):
+        """Handle /clear-tracked-threads slash command."""
+        await ack()
+        
+        user_id = body.get('user_id')
+        channel_id = body.get('channel_id')
+        
+        try:
+            # Access the event handlers through the bot instance
+            if hasattr(self.bot, 'event_handlers') and hasattr(self.bot.event_handlers, 'tracked_threads'):
+                thread_count = len(self.bot.event_handlers.tracked_threads)
+                self.bot.event_handlers.tracked_threads.clear()
+                self.bot.event_handlers._save_tracked_threads()
+                
+                response_text = f"✅ Cleared {thread_count} tracked threads. The bot will now only reply to new mentions in 'mention only' mode."
+            else:
+                response_text = "⚠️ Thread tracking not available or already empty."
+            
+            await client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=response_text
+            )
+            logging.info(f"User {user_id} cleared tracked threads")
+            
+        except Exception as e:
+            logging.error(f"Error in /clear-tracked-threads: {e}")
+            await client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=":x: Error clearing tracked threads. Please try again."
+            )

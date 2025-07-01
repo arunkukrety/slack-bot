@@ -31,6 +31,8 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from src.llm_models import LLM_MODELS, get_model_display_name, get_model_options
 from src.supabase import log_message_to_supabase
+from src.groq_service import GroqService
+from src.ai_service import AIService
 
 # Configure logging
 logging.basicConfig(
@@ -91,7 +93,6 @@ class BotSettings:
         self.default_settings = {
             "reply_in_thread": True,
             "mention_only": True,
-            "auto_respond": True,
             "llm_model": "meta-llama/llama-3.3-70b-instruct:free"
         }
         self.settings = self.load_settings()
@@ -198,7 +199,55 @@ class EventHandlers:
     def __init__(self, bot):
         self.bot = bot
         self.ai_service = bot.ai_service
+        self.groq_service = GroqService()  # Initialize Groq service
+        # Track threads where bot was mentioned for "mention only" mode
+        self.tracked_threads = set()
+        self.threads_file = "tracked_threads.json"
+        self._load_tracked_threads()
         self.setup_handlers()
+    
+    def _load_tracked_threads(self):
+        """Load tracked threads from persistent storage."""
+        try:
+            if os.path.exists(self.threads_file):
+                with open(self.threads_file, 'r') as f:
+                    data = json.load(f)
+                    self.tracked_threads = set(data.get('tracked_threads', []))
+                    logging.info(f"[Thread] Loaded {len(self.tracked_threads)} tracked threads from storage")
+            else:
+                logging.info("[Thread] No tracked threads file found, starting fresh")
+        except Exception as e:
+            logging.error(f"[Thread] Error loading tracked threads: {e}")
+            self.tracked_threads = set()
+    
+    def _save_tracked_threads(self):
+        """Save tracked threads to persistent storage."""
+        try:
+            data = {'tracked_threads': list(self.tracked_threads)}
+            with open(self.threads_file, 'w') as f:
+                json.dump(data, f)
+            logging.debug(f"[Thread] Saved {len(self.tracked_threads)} tracked threads to storage")
+        except Exception as e:
+            logging.error(f"[Thread] Error saving tracked threads: {e}")
+    
+    def _cleanup_old_threads(self, max_age_days=30):
+        """
+        Clean up tracked threads older than max_age_days.
+        Note: This is a simple cleanup based on thread count.
+        In production, you might want to track timestamps.
+        """
+        try:
+            # For simplicity, we'll limit the number of tracked threads
+            max_threads = 1000
+            if len(self.tracked_threads) > max_threads:
+                # Convert to list, sort, and keep only the most recent ones
+                threads_list = list(self.tracked_threads)
+                # Keep the last max_threads/2 entries (arbitrary cleanup strategy)
+                self.tracked_threads = set(threads_list[-(max_threads//2):])
+                self._save_tracked_threads()
+                logging.info(f"[Thread] Cleaned up old threads, now tracking {len(self.tracked_threads)} threads")
+        except Exception as e:
+            logging.error(f"[Thread] Error during thread cleanup: {e}")
     
     def setup_handlers(self):
         """Register event handlers."""
@@ -211,20 +260,43 @@ class EventHandlers:
         self.bot.app.view("settings_modal")(self.handle_settings_submission)
         self.bot.app.action("reply_in_thread_setting")(self.handle_checkbox_action)
         self.bot.app.action("mention_only_setting")(self.handle_checkbox_action)
-        self.bot.app.action("auto_respond_setting")(self.handle_checkbox_action)
     
     async def handle_mention(self, event, say):
         """Handle app_mention events."""
         logging.info(f"[Event] Recognized mention event: ts={event.get('ts')}, channel={event.get('channel')}")
-        await log_message_to_supabase(event, self.bot.client, self.bot.bot_id, msg_type="incoming")
+        
+        # For mentions, ALWAYS reply without classification
+        message_text = event.get("text", "")
+        
+        # Log message without classification (mentions always get replied to)
+        await log_message_to_supabase(
+            event, self.bot.client, self.bot.bot_id, 
+            msg_type="incoming",
+            important="YES",  # Always YES for mentions
+            repliable="YES"   # Always YES for mentions
+        )
+        
+        # For mention_only mode: track thread when bot is mentioned
+        thread_ts = event.get('thread_ts', event.get('ts'))
+        if thread_ts not in self.tracked_threads:
+            self.tracked_threads.add(thread_ts)
+            self._save_tracked_threads()
+            logging.debug(f"[Thread] Added thread {thread_ts} to tracked threads (mention_only mode)")
+            
+            # Periodic cleanup to prevent file from growing too large
+            if len(self.tracked_threads) % 100 == 0:  # Every 100 new threads
+                self._cleanup_old_threads()
+        
+        # ALWAYS reply to mentions
+        logging.info(f"[Event] Bot mentioned, sending AI response without classification")
         await self._send_ai_response(event, say)
+        
         logging.info(f"[Slack] Finished processing mention event: {event.get('ts')}")
 
     async def handle_message(self, message, say):
         """Handle message events."""
         logging.info(f"[Event] Recognized message event: ts={message.get('ts')}, channel={message.get('channel')}, thread_ts={message.get('thread_ts')}")
-        await log_message_to_supabase(message, self.bot.client, self.bot.bot_id, msg_type="incoming")
-
+        
         # Skip messages with bot mention (handled by handle_mention)
         bot_id = self.bot.bot_id
         text = message.get("text", "")
@@ -233,11 +305,65 @@ class EventHandlers:
             logging.debug(f"[Event] Skipping message with bot mention in channel, handled by app_mention: ts={message.get('ts')}")
             return
 
-        # Only reply in DMs if auto_respond is enabled
+        # Check if we should reply based on mention_only mode and thread tracking
+        settings = self.bot.settings.load_settings()
+        mention_only = settings.get("mention_only", False)
         is_dm = message.get("channel_type") == "im"
-        auto_respond = self.bot.settings.get("auto_respond")
-        if is_dm and auto_respond:
+        thread_ts = message.get('thread_ts', message.get('ts'))
+        
+        should_reply = False
+        should_classify = False
+        
+        # Always reply in DMs (auto_respond is always true)
+        if is_dm:
+            should_reply = True
+            should_classify = False  # No classification for DMs
+            logging.debug(f"[Reply] Replying to DM without classification: ts={message.get('ts')}")
+        
+        # For channel messages, check mention_only mode
+        elif not is_dm:
+            if mention_only:
+                # Only reply if this thread was previously mentioned
+                if thread_ts in self.tracked_threads:
+                    should_reply = True
+                    should_classify = False  # No classification for tracked threads
+                    logging.debug(f"[Reply] Replying to thread message without classification - thread {thread_ts} is tracked: ts={message.get('ts')}")
+                else:
+                    should_reply = False
+                    should_classify = False
+                    logging.debug(f"[Reply] Not replying - mention_only mode ON and thread {thread_ts} not tracked: ts={message.get('ts')}")
+            else:
+                # mention_only is OFF - check classification for channel messages
+                should_classify = True
+                logging.debug(f"[Reply] Will classify channel message - mention_only mode OFF: ts={message.get('ts')}")
+        
+        # Classification and logging
+        classification = {"important": "NO", "repliable": "NO"}
+        if should_classify:
+            message_text = message.get("text", "")
+            classification = await self.groq_service.classify_message(message_text)
+            logging.info(f"[Classification] Result - Important: {classification['important']}, Repliable: {classification['repliable']}")
+            
+            # Only reply if both important and repliable are YES
+            if classification["repliable"] == "YES":
+                should_reply = True
+                logging.info(f"[Event] Message classified as important and repliable, will send AI response")
+            else:
+                should_reply = False
+                logging.info(f"[Event] Message not classified for reply - Important: {classification['important']}, Repliable: {classification['repliable']}")
+        
+        # Log message with classification (or default values)
+        await log_message_to_supabase(
+            message, self.bot.client, self.bot.bot_id, 
+            msg_type="incoming",
+            important=classification["important"],
+            repliable=classification["repliable"]
+        )
+        
+        # Send response if appropriate
+        if should_reply:
             await self._send_ai_response(message, say)
+            
         logging.info(f"[Slack] Finished processing message event: {message.get('ts')}")
 
     async def handle_home_opened(self, event, client):
@@ -266,8 +392,7 @@ class EventHandlers:
                 "text": {
                     "type": "mrkdwn",
                     "text": f"*Settings:* Reply in Thread: {'✅' if settings['reply_in_thread'] else '❌'} | "
-                           f"Mention Only: {'✅' if settings['mention_only'] else '❌'} | "
-                           f"Auto Respond: {'✅' if settings['auto_respond'] else '❌'}"
+                           f"Mention Only: {'✅' if settings['mention_only'] else '❌'}"
                 }
             },
             {
@@ -311,11 +436,9 @@ class EventHandlers:
             
             reply_in_thread = len(values.get("reply_in_thread_block", {}).get("reply_in_thread_setting", {}).get("selected_options", [])) > 0
             mention_only = len(values.get("mention_only_block", {}).get("mention_only_setting", {}).get("selected_options", [])) > 0
-            auto_respond = len(values.get("auto_respond_block", {}).get("auto_respond_setting", {}).get("selected_options", [])) > 0
             
             self.bot.settings.set("reply_in_thread", reply_in_thread)
             self.bot.settings.set("mention_only", mention_only)
-            self.bot.settings.set("auto_respond", auto_respond)
             
             user_id = body["user"]["id"]
             await client.chat_postMessage(
@@ -335,7 +458,6 @@ class EventHandlers:
             return
         
         settings = self.bot.settings.load_settings()
-        channel_type = event.get("channel_type", "unknown")
         text = event.get("text", "")
         
         # Clean up the message text (remove bot mention for processing)
@@ -347,11 +469,6 @@ class EventHandlers:
         # Skip empty messages
         if not user_message:
             user_message = "Hello!"
-        
-        # Only respond in channels if mention_only is False
-        if channel_type != "im" and settings.get("mention_only"):
-            if not (self.bot.bot_id and f"<@{self.bot.bot_id}>" in text):
-                return
         
         thread_ts = None
         if settings.get("reply_in_thread"):
@@ -366,7 +483,11 @@ class EventHandlers:
                 "channel": event.get("channel"),
                 "text": ai_response
             }
-            await log_message_to_supabase(outgoing_message_data, self.bot.client, self.bot.bot_id, msg_type="outgoing")
+            # Log outgoing message without classification (it's a bot response)
+            await log_message_to_supabase(
+                outgoing_message_data, self.bot.client, self.bot.bot_id, 
+                msg_type="outgoing"
+            )
             await say(text=ai_response, thread_ts=thread_ts)
         except Exception as e:
             logging.error(f"[Event] Error sending AI response: {e}")
@@ -379,8 +500,7 @@ class EventHandlers:
         text = (
             "*⚙️ Bot Settings*\n\n"
             f"• Reply in Thread: {'✅' if settings['reply_in_thread'] else '❌'}\n"
-            f"• Mention Only: {'✅' if settings['mention_only'] else '❌'}\n"
-            f"• Auto Respond: {'✅' if settings['auto_respond'] else '❌'}\n\n"
+            f"• Mention Only: {'✅' if settings['mention_only'] else '❌'}\n\n"
             "Use `/bot-settings` or the App Home tab to change settings."
         )
         
@@ -416,83 +536,6 @@ class EventHandlers:
             await say(text=text)
         except Exception as e:
             logging.error(f"[Event] Error sending help info: {e}")
-
-
-class AIService:
-    """Handles AI-powered responses using OpenRouter."""
-    
-    def __init__(self, settings=None):
-        self.api_key = os.getenv("OPEN_ROUTER_KEY")
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.settings = settings
-        self.default_model = "meta-llama/llama-3.3-70b-instruct:free" 
-        if not self.api_key:
-            logging.warning("[AIService] OPEN_ROUTER_KEY not found or empty!")
-        else:
-            logging.info(f"[AIService] OPEN_ROUTER_KEY loaded: {self.api_key[:8]}...{'*' * (len(self.api_key)-12)}...{self.api_key[-4:]}")
-    
-    def get_current_model(self) -> str:
-        if self.settings:
-            return self.settings.get("llm_model", self.default_model)
-        return self.default_model
-    
-    async def get_response(self, user_message: str, user_id: str = None) -> Optional[str]:
-        if not self.api_key:
-            logging.error("[AIService] OPEN_ROUTER_KEY is missing at get_response!")
-            return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "X-Title": "Slack Bot"
-            }
-            payload = {
-                "model": self.get_current_model(),
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a helpful Slack bot assistant. Keep responses concise, "
-                            "friendly, and appropriate for workplace communication. "
-                            "Use emojis sparingly and professionally."
-                        )
-                    },
-                    {
-                        "role": "user", 
-                        "content": user_message
-                    }
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.base_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        logging.debug(f"[AIService] OpenRouter response: {data}")
-                        if "choices" not in data:
-                            logging.error(f"[AIService] No 'choices' in response: {data}")
-                            return "Sorry, I couldn't process the response. Please try again later! 🤔"
-                        ai_response = data["choices"][0]["message"]["content"]
-                        return ai_response.strip()
-                    else:
-                        error_text = await response.text()
-                        logging.error(f"[AIService] OpenRouter API error {response.status}: {error_text}")
-                        return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
-        except aiohttp.ClientError as e:
-            logging.error(f"[AIService] Network error calling OpenRouter: {e}")
-            return "Hello World! 🌐 (Network issue - please try again)"
-        except Exception as e:
-            logging.error(f"[AIService] Unexpected error in AI service: {e}")
-            return "Hello World! ⚠️ (Something went wrong)"
-    
-    def is_available(self) -> bool:
-        return bool(self.api_key)
 
 
 class SlackBot:
