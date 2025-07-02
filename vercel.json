@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "functions": {
+    "api/*.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/slack/events",
+      "dest": "/api/slack-events.py"
+    },
+    {
+      "src": "/api/slack/commands",
+      "dest": "/api/slack-commands.py"
+    },
+    {
+      "src": "/api/health",
+      "dest": "/api/health.py"
+    },
+    {
+      "src": "/",
+      "dest": "/api/health.py"
+    }
+  ],
+  "env": {
+    "SLACK_BOT_TOKEN": "@SLACK_BOT_TOKEN",
+    "SLACK_SIGNING_SECRET": "@SLACK_SIGNING_SECRET",
+    "OPEN_ROUTER_KEY": "@OPEN_ROUTER_KEY",
+    "GROQ_KEY": "@GROQ_KEY",
+    "SUPABASE_URL": "@SUPABASE_URL",
+    "SUPABASE_KEY": "@SUPABASE_KEY"
+  }
+}

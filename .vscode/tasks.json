@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Verify Vercel Setup",
+			"type": "shell",
+			"command": "echo 'Vercel Deployment Checklist:' && echo '✅ Health endpoint: api/health.py' && dir api\\health.py && echo '✅ Events endpoint: api/slack-events.py' && dir api\\slack-events.py && echo '✅ Commands endpoint: api/slack-commands.py' && dir api\\slack-commands.py && echo '✅ Vercel config: vercel.json' && dir vercel.json && echo '✅ Dependencies: requirements.txt' && type requirements.txt && echo '' && echo '🚀 Ready for: vercel --prod'",
+			"group": "build"
+		}
+	]
+}
