@@ -1,5 +1,5 @@
 {
   "reply_in_thread": true,
   "mention_only": false,
-  "llm_model": "google/gemini-2.0-flash-exp:free"
+  "llm_model": "meta-llama/llama-3.3-70b-instruct:free"
 }
