@@ -6,7 +6,7 @@ import json
 import logging
 import aiohttp
 from typing import Optional
-from .supabase import get_message_context
+from .Supabase import get_message_context
 
 
 class AIService:
