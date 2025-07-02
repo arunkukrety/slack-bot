@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-AI Slack Bot - Production Ready
-
-A clean, modular Slack bot powered by OpenRouter AI.
-Provides intelligent responses, configurable settings, and health monitoring.
-
-Usage:
-    python main.py
-
-Environment Variables:
-    SLACK_BOT_TOKEN - Bot token (xoxb-...)
-    SLACK_APP_TOKEN - App token (xapp-...)
-    OPEN_ROUTER_KEY - OpenRouter API key (sk-or-...)
-    PORT - Health server port (default: 8080)
-"""
-
 import asyncio
 import logging
 import os
@@ -30,7 +13,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from src.llm_models import LLM_MODELS, get_model_display_name, get_model_options
-from src.supabase import log_message_to_supabase
+from src.Supabase import log_message_to_supabase
 from src.groq_service import GroqService
 from src.ai_service import AIService
 
