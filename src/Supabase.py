@@ -151,3 +151,109 @@ async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str
             logging.error(f"[Supabase] Upsert failed: {resp}")
     except Exception as e:
         logging.error(f"[Supabase] Failed to log message {ts}: {e}")
+
+
+# SYNCHRONOUS VERSIONS FOR SERVERLESS/VERCEL COMPATIBILITY
+
+def get_user_name_sync(bot_token: str, user_id: str) -> str:
+    """Fetch user name from Slack API synchronously using requests."""
+    import requests
+    
+    if not user_id or user_id == "unknown":
+        return "unknown"
+    if user_id in user_cache:
+        logging.debug(f"[Supabase] Retrieved user name from cache: {user_id} -> {user_cache[user_id]}")
+        return user_cache[user_id]
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {bot_token}",
+            "Content-Type": "application/json"
+        }
+        response = requests.get(
+            f"https://slack.com/api/users.info?user={user_id}",
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("ok"):
+            user_name = data["user"].get("name") or data["user"].get("real_name") or "unknown"
+            user_cache[user_id] = user_name
+            logging.debug(f"[Supabase] Fetched user name: {user_id} -> {user_name}")
+            return user_name
+        else:
+            logging.error(f"[Supabase] Failed to fetch user info for {user_id}: {data.get('error')}")
+            return "unknown"
+    except Exception as e:
+        logging.error(f"[Supabase] Error fetching user name for {user_id}: {e}")
+        return "unknown"
+
+
+def get_message_context_sync() -> str:
+    """Fetch recent messages from Supabase for LLM context (synchronous version)."""
+    supabase = get_supabase_client()
+    if not supabase:
+        logging.error("[Supabase] Supabase client not available. Cannot fetch context.")
+        return ""
+
+    try:
+        # Get the last 20 messages, sorted by timestamp descending
+        response = supabase.table("messages").select("*").order("timestamp", desc=True).limit(20).execute()
+        
+        if hasattr(response, "data") and response.data:
+            messages = response.data
+            context = format_messages_for_context(messages)
+            logging.info(f"[Supabase] Retrieved {len(messages)} messages for context.")
+            return context
+        else:
+            logging.warning("[Supabase] No messages found in database.")
+            return ""
+    except Exception as e:
+        logging.error(f"[Supabase] Failed to fetch message context: {e}")
+        return ""
+
+
+def log_message_to_supabase_sync(msg: dict, bot_token: str, bot_id: str, msg_type: str = "incoming", important: str = None, repliable: str = None):
+    """Log a Slack message to Supabase synchronously."""
+    logging.debug(f"Raw message: {msg}")
+    supabase = get_supabase_client()
+    if not supabase:
+        logging.error("[Supabase] Supabase client not available. Message not logged.")
+        return
+
+    ts = msg.get("ts")
+    if not ts:
+        logging.error("[Supabase] Message missing timestamp. Cannot log.")
+        return
+
+    user_id = msg.get("user") or "unknown"
+    user_name = get_user_name_sync(bot_token, bot_id if msg_type == "outgoing" else user_id)
+
+    logging.info(f"[Supabase] Logging message: ts={ts}, type={msg_type}, channel={msg.get('channel')}, user={user_name}, important={important}, repliable={repliable}")
+    iso_timestamp = slack_ts_to_iso(ts)
+    if not iso_timestamp:
+        logging.error(f"[Supabase] Failed to convert timestamp for message {ts}. Skipping.")
+        return
+
+    data = {
+        "id": ts,
+        "thread_ts": msg.get("thread_ts") or None,
+        "user_id": user_id,
+        "user_name": user_name or "unknown",
+        "channel_id": msg.get("channel") or "unknown",
+        "content": msg.get("text", ""),
+        "timestamp": iso_timestamp,
+        "message_type": msg_type,
+        "important": important,
+        "repliable": repliable
+    }
+    try:
+        resp = supabase.table("messages").upsert(data, on_conflict="id").execute()
+        if hasattr(resp, "data") and resp.data:
+            logging.info(f"[Supabase] Message {data['id']} logged successfully.")
+        else:
+            logging.error(f"[Supabase] Upsert failed: {resp}")
+    except Exception as e:
+        logging.error(f"[Supabase] Failed to log message {ts}: {e}")
