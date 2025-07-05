@@ -7,6 +7,7 @@ import logging
 import aiohttp
 from typing import Optional
 from .Supabase import get_message_context
+from .memzero import mem0_service
 
 
 class AIService:
@@ -35,6 +36,13 @@ class AIService:
             # Get message context from Supabase
             message_context = await get_message_context()
             
+            # Get user memories from Mem0
+            memory_context = ""
+            if user_id and mem0_service.is_available():
+                memory_context = mem0_service.get_memories(user_id, user_message)
+                if memory_context:
+                    logging.info(f"[AIService] Retrieved memories for user {user_id}:\n{memory_context}")
+            
             # Build system prompt with context
             system_content = (
                 "You are a helpful Slack bot assistant. Keep responses concise, "
@@ -42,8 +50,11 @@ class AIService:
                 "Use emojis sparingly and professionally."
             )
             
-            if message_context:
-                system_content += f"\n\nHere are some recent messages for reference:\n{message_context}"
+            if memory_context:
+                system_content += f"\n\nUser Memory Context:\n{memory_context}"
+            
+            # if message_context:
+            #     system_content += f"\n\nRecent Messages:\n{message_context}"
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -67,6 +78,8 @@ class AIService:
                 "temperature": 0.7
             }
             
+            logging.info(f"[AIService] Sending payload to OpenRouter: {json.dumps(payload, indent=2)}")
+            
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self.base_url,
@@ -81,6 +94,11 @@ class AIService:
                             logging.error(f"[AIService] No 'choices' in response: {data}")
                             return "Sorry, I couldn't process the response. Please try again later! 🤔"
                         ai_response = data["choices"][0]["message"]["content"]
+                        
+                        # Store user message in Mem0
+                        if user_id and mem0_service.is_available():
+                            mem0_service.add_user_message(user_id, user_message)
+                        
                         return ai_response.strip()
                     else:
                         error_text = await response.text()

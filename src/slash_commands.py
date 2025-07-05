@@ -4,6 +4,7 @@ import os
 import logging
 from slack_sdk.errors import SlackApiError
 from .llm_models import LLM_MODELS, get_model_display_name, get_model_options
+from .memzero import mem0_service
 
 
 class SlashCommands:
@@ -105,6 +106,9 @@ class SlashCommands:
             groq_service = getattr(self.bot.event_handlers, 'groq_service', None)
             groq_status = "✅ Available" if groq_service and groq_service.is_available() else "❌ Missing GROQ_API_KEY"
             
+            # Check Mem0 service status
+            mem0_status = "✅ Available" if mem0_service.is_available() else "❌ Disabled"
+            
             current_model = self.bot.settings.get("llm_model", "meta-llama/llama-3.3-70b-instruct:free")
             model_display = get_model_display_name(current_model)
             
@@ -121,6 +125,7 @@ class SlashCommands:
                 f"• Settings File: {'Found' if os.path.exists('bot_settings.json') else 'Missing'}\n"
                 f"• AI Service: {ai_status}\n"
                 f"• Groq Classification: {groq_status}\n"
+                f"• Memory System: {mem0_status}\n"
                 f"• Current Model: {model_display}\n\n"
                 "*Current Settings:*\n"
                 f"• Reply in Thread: `{self.bot.settings.get('reply_in_thread')}`\n"

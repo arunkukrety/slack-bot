@@ -214,11 +214,6 @@ class EventHandlers:
             logging.error(f"[Thread] Error saving tracked threads: {e}")
     
     def _cleanup_old_threads(self, max_age_days=30):
-        """
-        Clean up tracked threads older than max_age_days.
-        Note: This is a simple cleanup based on thread count.
-        In production, you might want to track timestamps.
-        """
         try:
             # For simplicity, we'll limit the number of tracked threads
             max_threads = 1000
