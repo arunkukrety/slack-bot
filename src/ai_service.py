@@ -33,35 +33,37 @@ class AIService:
             return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
         
         try:
-            # Get message context from Supabase
-            message_context = await get_message_context()
-            
-            # Get user memories from Mem0
-            memory_context = ""
+            # Parallelize context and memory retrieval
+            import asyncio
+            context_task = asyncio.create_task(get_message_context())
+            memory_task = None
             if user_id and mem0_service.is_available():
-                memory_context = mem0_service.get_memories(user_id, user_message)
-                if memory_context:
-                    logging.info(f"[AIService] Retrieved memories for user {user_id}:\n{memory_context}")
-            
+                # Wrap sync call in a thread to avoid blocking event loop
+                loop = asyncio.get_running_loop()
+                memory_task = loop.run_in_executor(None, mem0_service.get_memories, user_id, user_message)
+            else:
+                memory_task = asyncio.create_task(asyncio.sleep(0, result=""))
+            message_context, memory_context = await asyncio.gather(context_task, memory_task)
+
+            if memory_context:
+                logging.info(f"[AIService] Retrieved memories for user {user_id}:\n{memory_context}")
+
             # Build system prompt with context
             system_content = (
                 "You are a helpful Slack bot assistant. Keep responses concise, "
                 "friendly, and appropriate for workplace communication. "
                 "Use emojis sparingly and professionally."
             )
-            
             if memory_context:
                 system_content += f"\n\nUser Memory Context:\n{memory_context}"
-            
             # if message_context:
             #     system_content += f"\n\nRecent Messages:\n{message_context}"
-            
+
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "X-Title": "Slack Bot"
             }
-            
             payload = {
                 "model": self.get_current_model(),
                 "messages": [
@@ -77,9 +79,7 @@ class AIService:
                 "max_tokens": 500,
                 "temperature": 0.7
             }
-            
             logging.info(f"[AIService] Sending payload to OpenRouter: {json.dumps(payload, indent=2)}")
-            
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self.base_url,
@@ -94,17 +94,14 @@ class AIService:
                             logging.error(f"[AIService] No 'choices' in response: {data}")
                             return "Sorry, I couldn't process the response. Please try again later! 🤔"
                         ai_response = data["choices"][0]["message"]["content"]
-                        
-                        # Store user message in Mem0
+                        # Store user message in Mem0 (fire-and-forget)
                         if user_id and mem0_service.is_available():
-                            mem0_service.add_user_message(user_id, user_message)
-                        
+                            asyncio.create_task(asyncio.to_thread(mem0_service.add_user_message, user_id, user_message))
                         return ai_response.strip()
                     else:
                         error_text = await response.text()
                         logging.error(f"[AIService] OpenRouter API error {response.status}: {error_text}")
                         return "Sorry, I'm having trouble thinking right now. Try again in a moment! 🤔"
-                        
         except aiohttp.ClientError as e:
             logging.error(f"Network error calling OpenRouter: {e}")
             return "Hello World! 🌐 (Network issue - please try again)"

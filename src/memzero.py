@@ -1,6 +1,3 @@
-"""
-Mem0 memory service for persistent user conversations
-"""
 import os
 import logging
 from typing import Dict, List, Optional
@@ -53,7 +50,7 @@ class Mem0Service:
            return False
    
    def get_memories(self, user_id: str, query: str) -> str:
-       """Retrieve relevant memories for user based on query"""
+       """Retrieve relevant memories for user based on query using Mem0 v2 search API"""
        if not self.is_available():
            return ""
            
@@ -61,8 +58,15 @@ class Mem0Service:
            return ""
            
        try:
-           # Always use search with the query to get relevant memories
-           result = self.client.search(query, user_id=user_id, score_threshold=0.5)
+           # Use v2 search API with filters for user_id
+           result = self.client.search(
+               query=query,
+               version="v2",
+               filters={
+                   "user_id": user_id
+               },
+               threshold=0.5
+           )
            
            if result and len(result) > 0:
                memories = []

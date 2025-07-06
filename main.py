@@ -247,12 +247,12 @@ class EventHandlers:
         message_text = event.get("text", "")
         
         # Log message without classification (mentions always get replied to)
-        await log_message_to_supabase(
+        asyncio.create_task(log_message_to_supabase(
             event, self.bot.client, self.bot.bot_id, 
             msg_type="incoming",
             important="YES",  # Always YES for mentions
             repliable="YES"   # Always YES for mentions
-        )
+        ))
         
         # For mention_only mode: track thread when bot is mentioned
         thread_ts = event.get('thread_ts', event.get('ts'))
