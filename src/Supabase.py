@@ -82,10 +82,10 @@ async def get_message_context() -> str:
         
         if hasattr(response, "data") and response.data:
             formatted_messages = format_messages_for_context(response.data)
-            logging.info(f"[Supabase] Retrieved {len(response.data)} messages for context.")
+            logging.info(f"[Supabase] Retrieved {len(response.data)} messages from channel for context.")
             return formatted_messages
         else:
-            logging.warning("[Supabase] No messages found in database.")
+            logging.warning("[Supabase] No messages found in database for channel context.")
             return ""
             
     except Exception as e:
@@ -151,3 +151,27 @@ async def log_message_to_supabase(msg: dict, client: AsyncWebClient, bot_id: str
             logging.error(f"[Supabase] Upsert failed: {resp}")
     except Exception as e:
         logging.error(f"[Supabase] Failed to log message {ts}: {e}")
+
+async def get_thread_context(thread_ts: str) -> str:
+    """Fetch all messages from Supabase for the given thread_ts."""
+    supabase = get_supabase_client()
+    if not supabase or not thread_ts:
+        logging.error("[Supabase] Supabase client not available or thread_ts missing. Cannot fetch thread context.")
+        return ""
+    try:
+        response = supabase.table("messages") \
+            .select("content, user_name, timestamp") \
+            .or_(f"thread_ts.eq.{thread_ts},important.eq.yes") \
+            .order("timestamp", desc=False) \
+            .limit(50) \
+            .execute()
+        if hasattr(response, "data") and response.data:
+            formatted_messages = format_messages_for_context(response.data)
+            logging.info(f"[Supabase] Retrieved {len(response.data)} messages from thread {thread_ts} for context.")
+            return formatted_messages
+        else:
+            logging.warning(f"[Supabase] No messages found for thread {thread_ts} context.")
+            return ""
+    except Exception as e:
+        logging.error(f"[Supabase] Failed to fetch thread context: {e}")
+        return ""

@@ -6,7 +6,7 @@ import json
 import logging
 import aiohttp
 from typing import Optional
-from .Supabase import get_message_context
+from .Supabase import get_message_context, get_thread_context
 from .memzero import mem0_service
 
 
@@ -28,14 +28,20 @@ class AIService:
             return self.settings.get("llm_model", self.default_model)
         return self.default_model
     
-    async def get_response(self, user_message: str, user_id: str = None) -> Optional[str]:
+    async def get_response(self, user_message: str, user_id: str = None, thread_ts: str = None) -> Optional[str]:
         if not self.api_key:
             return "Hello World! 🤖 (missing OPEN_ROUTER_KEY)"
         
         try:
             # Parallelize context and memory retrieval
             import asyncio
-            context_task = asyncio.create_task(get_message_context())
+            # Use thread context if thread_ts is provided, else fallback to channel context
+            if thread_ts:
+                logging.info(f"[AIService] Using thread context for thread_ts: {thread_ts}")
+                context_task = asyncio.create_task(get_thread_context(thread_ts))
+            else:
+                logging.info("[AIService] Using channel context (no thread_ts provided)")
+                context_task = asyncio.create_task(get_message_context())
             memory_task = None
             if user_id and mem0_service.is_available():
                 # Wrap sync call in a thread to avoid blocking event loop
@@ -45,19 +51,27 @@ class AIService:
                 memory_task = asyncio.create_task(asyncio.sleep(0, result=""))
             message_context, memory_context = await asyncio.gather(context_task, memory_task)
 
+            if message_context:
+                context_type = "thread" if thread_ts else "channel"
+                num_messages = len([line for line in message_context.split('\n') if line.strip()])
+                logging.info(f"[AIService] Retrieved {num_messages} messages from Supabase for {context_type} context.")
+            else:
+                context_type = "thread" if thread_ts else "channel"
+                logging.warning(f"[AIService] No {context_type} context retrieved from Supabase")
+
             if memory_context:
                 logging.info(f"[AIService] Retrieved memories for user {user_id}:\n{memory_context}")
 
-            # Build system prompt with context
             system_content = (
-                "You are a helpful Slack bot assistant. Keep responses concise, "
-                "friendly, and appropriate for workplace communication. "
-                "Use emojis sparingly and professionally."
+                "You are a helpful Slack bot assistant. Your tone should be professional-casual—clear, friendly, "
+                "and confident, with a light touch of humor when appropriate. Keep responses concise and workplace-appropriate. "
+                "Always format output to look clean and readable in Slack. Be helpful, witty (when it fits), and never robotic."
+                "Use slack markdown rules for formatting. Act accordingly as per the context given to you.\n"
             )
+            if message_context:
+                system_content += f"\n\nRecent Messages:\n{message_context}"
             if memory_context:
                 system_content += f"\n\nUser Memory Context:\n{memory_context}"
-            # if message_context:
-            #     system_content += f"\n\nRecent Messages:\n{message_context}"
 
             headers = {
                 "Authorization": f"Bearer {self.api_key}",

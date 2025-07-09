@@ -448,15 +448,19 @@ class EventHandlers:
         if not user_message:
             user_message = "Hello!"
         
-        thread_ts = None
+        # Always get thread_ts for context retrieval (separate from reply_in_thread setting)
+        thread_ts_for_context = event.get("thread_ts", event.get("ts"))
+        
+        # Only set thread_ts for reply if reply_in_thread is enabled
+        thread_ts_for_reply = None
         if settings.get("reply_in_thread"):
-            thread_ts = event.get("thread_ts", event.get("ts"))
+            thread_ts_for_reply = thread_ts_for_context
         
         try:
-            ai_response = await self.ai_service.get_response(user_message, user_id)
+            ai_response = await self.ai_service.get_response(user_message, user_id, thread_ts_for_context)
             outgoing_message_data = {
                 "ts": str(time.time()),  # Unique timestamp for outgoing message
-                "thread_ts": thread_ts,
+                "thread_ts": thread_ts_for_reply,
                 "user": self.bot.bot_id,
                 "channel": event.get("channel"),
                 "text": ai_response
@@ -466,10 +470,10 @@ class EventHandlers:
                 outgoing_message_data, self.bot.client, self.bot.bot_id, 
                 msg_type="outgoing"
             )
-            await say(text=ai_response, thread_ts=thread_ts)
+            await say(text=ai_response, thread_ts=thread_ts_for_reply)
         except Exception as e:
             logging.error(f"[Event] Error sending AI response: {e}")
-            await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts)
+            await say(text="Hello World! 🤖 (AI temporarily unavailable)", thread_ts=thread_ts_for_reply)
     
     async def _send_settings_info(self, message, say):
         """Send settings info via DM."""
